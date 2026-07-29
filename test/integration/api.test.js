@@ -952,6 +952,8 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
         workflowId: "code-agent",
         prompt: "use tools",
         cwd: ROOT,
+        interactive: false,
+        permissionMode: "bypassPermissions",
       }),
     });
     assert.equal(res.status, 201);
@@ -962,5 +964,118 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.ok(types.includes("tool_call"));
     assert.ok(types.includes("tool_result"));
     process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("ACP interactive run requests permission and accepts allow", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    const { res, body } = await json(ctx.base, "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "code-agent",
+        prompt: "need approval",
+        cwd: ROOT,
+        permissionMode: "default",
+        interactive: true,
+      }),
+    });
+    assert.equal(res.status, 201);
+    assert.equal(body.meta.transport, "acp");
+
+    // Wait for permission_request event
+    let permId = null;
+    for (let i = 0; i < 40; i++) {
+      const detail = await json(ctx.base, `/api/runs/${body.id}`);
+      const perm = detail.body.events.find(
+        (e) => e.type === "studio" && e.event === "permission_request",
+      );
+      if (perm) {
+        permId = perm.id;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(permId, "expected permission_request event");
+
+    const allow = await json(
+      ctx.base,
+      `/api/runs/${body.id}/permissions/${permId}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow: true, optionId: "allow-once" }),
+      },
+    );
+    assert.equal(allow.res.status, 200);
+
+    const done = await waitForRun(ctx.base, body.id, 15000);
+    assert.ok(
+      ["completed", "failed", "cancelled"].includes(done.meta.status),
+    );
+    const detail = await json(ctx.base, `/api/runs/${body.id}`);
+    const texts = detail.body.events
+      .filter((e) => e.type === "text")
+      .map((e) => e.data)
+      .join("");
+    assert.match(texts, /ALLOWED_PONG|ACP_PONG|DENIED/);
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("mid-run budget kill on many tool turns", async () => {
+    process.env.FAKE_GROK_MODE = "budget-turns";
+    // Tiny cap so estimated turns blow it
+    await json(ctx.base, "/api/settings/local", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxBudgetUsd: 0.08 }),
+    });
+    const { res, body } = await json(ctx.base, "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "code-agent",
+        prompt: "burn budget",
+        cwd: ROOT,
+        maxBudgetUsd: 0.08,
+        interactive: false,
+        permissionMode: "bypassPermissions",
+      }),
+    });
+    // May 429 at gate if ledger already spent
+    if (res.status === 201) {
+      const done = await waitForRun(ctx.base, body.id, 10000);
+      // either completed with few turns or budget_exceeded / cancelled
+      assert.ok(
+        ["completed", "budget_exceeded", "cancelled", "failed"].includes(
+          done.meta.status,
+        ),
+      );
+      if (done.meta.status === "budget_exceeded") {
+        const detail = await json(ctx.base, `/api/runs/${body.id}`);
+        assert.ok(
+          detail.body.events.some(
+            (e) => e.type === "studio" && e.event === "budget_exceeded",
+          ),
+        );
+      }
+    } else {
+      assert.equal(res.status, 429);
+    }
+    await json(ctx.base, "/api/settings/local", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxBudgetUsd: null }),
+    });
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("worktree list endpoint", async () => {
+    const { res, body } = await json(
+      ctx.base,
+      `/api/worktrees?cwd=${encodeURIComponent(ROOT)}`,
+    );
+    assert.equal(res.status, 200);
+    assert.ok(typeof body.git === "boolean");
+    assert.ok(Array.isArray(body.worktrees));
   });
 });

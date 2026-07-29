@@ -312,6 +312,9 @@ async function loadSettings() {
   state.extendedThinking = data.settings.extendedThinking !== false;
   $("#yolo").checked = state.permissionMode === "bypassPermissions";
   $("#background").checked = Boolean(data.settings.background?.default);
+  if ($("#worktree")) {
+    $("#worktree").checked = Boolean(data.settings.worktree?.default);
+  }
   syncPermUi();
   syncThinkUi();
   if (data.settings.model) {
@@ -956,6 +959,7 @@ async function sendMessage() {
           : null,
         agent: $("#agent-select").value || null,
         background: $("#background").checked,
+        worktree: Boolean($("#worktree")?.checked),
         sshConnectionId: sshId || null,
         aspect_ratio: $("#aspect").value,
         duration: $("#duration").value,
@@ -1054,6 +1058,24 @@ function streamRun(runId, assistantMsgId) {
         detail: formatToolPayload(result, 320),
       });
       paint("running");
+    } else if (msg.type === "studio" && msg.event === "permission_request") {
+      showPermissionPrompt(runId, msg);
+    } else if (msg.type === "studio" && msg.event === "budget_exceeded") {
+      textAcc += `\n\n[budget] ${msg.message || "Budget exceeded"}`;
+      pushTool({
+        name: "budget",
+        kind: "error",
+        detail: formatToolPayload(msg.message, 240),
+      });
+      paint("failed");
+      toast(msg.message || "Budget exceeded", "");
+    } else if (msg.type === "studio" && msg.event === "transport") {
+      pushTool({
+        name: "transport",
+        kind: "call",
+        detail: `${msg.transport || "?"} · ${msg.permissionMode || ""}`,
+      });
+      paint("running");
     } else if (msg.type === "studio" && msg.event === "stderr" && msg.data) {
       const line = String(msg.data).trim();
       if (line) {
@@ -1140,6 +1162,67 @@ async function cancelRun() {
   if (!state.runId) return;
   await api(`/api/runs/${state.runId}/cancel`, { method: "POST" });
   toast("Cancel sent");
+}
+
+/**
+ * Interactive ACP permission prompt (approve / deny tool call).
+ */
+function showPermissionPrompt(runId, evt) {
+  const tool = evt.toolCall || {};
+  const title = tool.title || tool.kind || "Tool permission";
+  const input = formatToolPayload(
+    tool.rawInput ?? tool.input ?? tool.arguments ?? tool,
+    400,
+  );
+  const options = evt.options || [];
+  const allowOpt =
+    options.find((o) => o.kind === "allow_once" || o.kind === "allow_always") ||
+    options[0];
+  const denyOpt =
+    options.find(
+      (o) =>
+        o.kind === "reject_once" ||
+        o.kind === "reject_always" ||
+        /reject|deny/i.test(o.name || ""),
+    ) || null;
+
+  openModal(
+    "permission",
+    "Permission required",
+    `
+    <div class="perm-prompt">
+      <p><strong>${escapeHtml(title)}</strong></p>
+      <pre class="perm-input">${escapeHtml(input)}</pre>
+      <div class="settings-actions">
+        <button type="button" class="ghost" id="perm-deny">Deny</button>
+        <button type="button" class="primary" id="perm-allow">Allow</button>
+      </div>
+      <p class="muted tiny">Interactive mode uses Grok ACP (<code>session/request_permission</code>).</p>
+    </div>
+    `,
+  );
+
+  const send = async (decision) => {
+    await api(`/api/runs/${runId}/permissions/${encodeURIComponent(evt.id)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(decision),
+    });
+    closeModal();
+    toast(decision.deny || decision.cancelled ? "Denied" : "Allowed", "ok");
+  };
+
+  $("#perm-allow").onclick = () =>
+    send({
+      allow: true,
+      optionId: allowOpt?.optionId,
+    });
+  $("#perm-deny").onclick = () =>
+    send({
+      deny: true,
+      cancelled: true,
+      optionId: denyOpt?.optionId,
+    });
 }
 
 function autoSizePrompt() {

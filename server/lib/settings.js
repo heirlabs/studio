@@ -44,6 +44,10 @@ export const DEFAULT_SETTINGS = {
   ssh: {
     defaultConnectionId: null,
   },
+  worktree: {
+    default: false,
+    name: null,
+  },
 };
 
 function deepMerge(base, patch) {
@@ -198,6 +202,16 @@ export function validateSettingsPatch(patch) {
   }
   if (patch.ssh != null) {
     out.ssh = { ...patch.ssh };
+  }
+  if (patch.worktree != null) {
+    if (typeof patch.worktree !== "object") {
+      out.worktree = { default: Boolean(patch.worktree) };
+    } else {
+      out.worktree = { ...patch.worktree };
+      if (patch.worktree.default != null) {
+        out.worktree.default = Boolean(patch.worktree.default);
+      }
+    }
   }
   return out;
 }

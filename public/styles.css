@@ -1222,6 +1222,20 @@ button {
   font-size: 0.65rem;
 }
 
+.perm-prompt pre.perm-input {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 10px 0 14px;
+}
+
 .budget-bar {
   font-size: 0.72rem;
   color: var(--muted);

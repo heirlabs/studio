@@ -26,6 +26,9 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Tool stream UI | Live tool_call / tool_result / stderr cards with payload previews |
 | File attachments | Images **and** text/code files (`@path` into the prompt) |
 | Stuck-run recovery | Startup + `POST /api/runs/reconcile` marks orphaned `running` metas aborted |
+| Interactive approvals | ACP (`grok agent stdio`) for `default` / `acceptEdits`; UI Allow/Deny modal |
+| Mid-run budget | Kill run when day spend + est. turns exceed `maxBudgetUsd` |
+| Worktree isolation | Optional git worktree per run (`worktree` checkbox) |
 
 **Binds only to `127.0.0.1`.** Non-loopback clients get `403`.
 
@@ -177,12 +180,13 @@ npm test
 
 ### Known limits (honest)
 
-- **Budget USD** is a local estimate (`$0.05`/turn default), not xAI billing — enforced before spawn, not mid-turn
-- **SSH remote runs** use `scp` + `ssh` BatchMode; live connectivity is not CI-tested (no remote host in suite)
+- **Budget USD** is a local estimate (`$0.05`/turn default when no `total_cost_usd` on `end`); pre-spawn gate + mid-run kill on tool turns. Not a substitute for xAI billing
+- **SSH remote runs** use `scp` + `ssh` BatchMode; stay on headless transport (no ACP over SSH yet); live connectivity is not CI-tested
 - **Subagents** are Grok’s own `spawn_subagent` / `--agent` profiles — Studio surfaces definitions and flags, does not reimplement the agent loop
 - **`forwardSubagentText`** is a settings field for parity only; Grok CLI has no `--forward-subagent-text` flag
+- **Interactive approvals** use ACP for `default` / `acceptEdits` only; `bypassPermissions` / `plan` / `auto` / `dontAsk` stay on headless streaming-json
 - **Screen control** (OS-level UI automation) is out of scope for this app
-- **Agent loop** is the real Grok CLI process (tool request → execute → stream); Studio is the desktop shell + orchestration, not a reimplementation of the model
+- **Agent loop** is the real Grok CLI process (headless or ACP); Studio is the desktop shell + orchestration
 
 ## Troubleshooting
 

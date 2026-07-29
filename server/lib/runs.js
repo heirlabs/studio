@@ -16,6 +16,10 @@ import { agentToCliArgs } from "./agents.js";
 import { providerToEnv } from "./providers.js";
 import { assertBudgetAllows, recordRunUsage } from "./budget.js";
 import {
+  createRunBudgetTracker,
+  costFromEndEvent,
+} from "./budget-runtime.js";
+import {
   registerBackgroundJob,
   finishBackgroundJob,
 } from "./background.js";
@@ -25,6 +29,11 @@ import {
   buildRemoteGrokCommand,
   spawnRemoteCommand,
 } from "./ssh.js";
+import {
+  needsInteractiveApprovals,
+  runAcpTurn,
+} from "./acp-client.js";
+import { resolveRunCwd } from "./worktrees.js";
 
 /**
  * Resolve image references to absolute existing paths under uploads (or abs).
@@ -235,6 +244,23 @@ export function buildGrokArgs({
   return args;
 }
 
+/**
+ * Apply mid-run budget + turn accounting to a streaming event.
+ * Returns { kill: boolean, reason?: string, evt }.
+ */
+export function processRunEventForBudget(budget, evt) {
+  if (!evt || !budget) return { kill: false, evt };
+  if (evt.type === "tool_call" || evt.type === "tool") {
+    const r = budget.onTurn();
+    if (!r.allow) return { kill: true, reason: r.reason, evt };
+  }
+  if (evt.type === "end") {
+    const cost = costFromEndEvent(evt);
+    if (cost != null) budget.onActualCost(cost);
+  }
+  return { kill: false, evt };
+}
+
 export function createRunManager(cfg, log) {
   /** @type {Map<string, any>} */
   const active = new Map();
@@ -362,6 +388,9 @@ export function createRunManager(cfg, log) {
     cwd,
     resumeGrokSessionId,
     chatSessionId,
+    worktree,
+    worktreeName,
+    interactive,
     onEvent,
     onFinish,
   }) {
@@ -391,10 +420,22 @@ export function createRunManager(cfg, log) {
 
     // Local project cwd required unless SSH remote (remote uses remoteCwd)
     let workDir;
+    let worktreeInfo = null;
     if (sshConn) {
       workDir = sshConn.remoteCwd || "~";
     } else {
-      workDir = resolveProjectCwd(cwd, cfg.defaultProjectCwd);
+      const projectRoot = resolveProjectCwd(cwd, cfg.defaultProjectCwd);
+      if (worktree) {
+        const resolved = resolveRunCwd({
+          projectCwd: projectRoot,
+          worktree: true,
+          worktreeName: worktreeName || chatSessionId?.slice(0, 8),
+        });
+        workDir = resolved.cwd;
+        worktreeInfo = resolved.worktree;
+      } else {
+        workDir = projectRoot;
+      }
     }
 
     let absImages;
@@ -507,6 +548,14 @@ export function createRunManager(cfg, log) {
       agent: agent || null,
       background: Boolean(background),
       sshConnectionId: sshConnectionId || null,
+      worktree: worktreeInfo
+        ? {
+            name: worktreeInfo.name,
+            path: worktreeInfo.path,
+            branch: worktreeInfo.branch,
+          }
+        : null,
+      transport: null,
       grokBin: cfg.grokBin,
       args: localArgs,
       error: null,
@@ -519,9 +568,16 @@ export function createRunManager(cfg, log) {
       flags: "a",
     });
 
+    const budget = createRunBudgetTracker({
+      dataDir: cfg.data,
+      maxBudgetUsd,
+      sessionId: chatSessionId || null,
+    });
+
     const state = {
       id,
       proc: null,
+      acpHandle: null,
       clients: new Set(),
       status: "running",
       events: [],
@@ -534,6 +590,8 @@ export function createRunManager(cfg, log) {
       meta,
       logStream,
       background: Boolean(background),
+      budget,
+      pendingPermissions: new Map(),
     };
     active.set(id, state);
 
@@ -554,6 +612,48 @@ export function createRunManager(cfg, log) {
           res.once("drain", () => {});
         }
       }
+    };
+
+    const killForBudget = (reason) => {
+      meta.status = "budget_exceeded";
+      meta.error = reason;
+      meta.finishedAt = Date.now();
+      writeMeta(runDir, meta);
+      broadcast({
+        type: "studio",
+        event: "budget_exceeded",
+        message: reason,
+        budget: budget.status(),
+      });
+      if (state.acpHandle) {
+        state.acpHandle.cancel();
+      } else if (state.proc) {
+        state.proc.kill("SIGTERM");
+        setTimeout(() => {
+          if (state.proc && !state.proc.killed) state.proc.kill("SIGKILL");
+        }, 2000);
+      }
+    };
+
+    const handleStreamEvent = (evt) => {
+      if (evt.type === "text" && evt.data) state.textAcc += evt.data;
+      if (evt.type === "thought" && evt.data) state.thoughtAcc += evt.data;
+      if (evt.type === "tool_call" || evt.type === "tool") {
+        state.turnCount += 1;
+        meta.turnCount = state.turnCount;
+      }
+      if (evt.type === "end" && evt.sessionId) {
+        meta.sessionId = evt.sessionId;
+      }
+      if (evt.type === "studio" && evt.event === "permission_request") {
+        state.pendingPermissions.set(String(evt.id), evt);
+      }
+      const budgetCheck = processRunEventForBudget(budget, evt);
+      broadcast(evt);
+      if (budgetCheck.kill) {
+        killForBudget(budgetCheck.reason);
+      }
+      return budgetCheck;
     };
 
     broadcast({
@@ -586,12 +686,166 @@ export function createRunManager(cfg, log) {
       permissionMode: meta.permissionMode,
       background: meta.background,
       ssh: Boolean(sshConn),
+      worktree: Boolean(worktreeInfo),
     });
 
     const { env: spawnEnv } = providerToEnv(provider || {}, {
       ...process.env,
       NO_COLOR: "1",
     });
+
+    const finalizeRun = (code, signal) => {
+      const seenSources = new Set();
+      const sessionCwd = sshConn ? cfg.root : meta.cwd || cfg.root;
+      const harvested = [
+        ...harvestFromText(state.textAcc, runOut, seenSources),
+        ...harvestFromSession({
+          sessionsRoot: cfg.sessionsRoot,
+          cwd: sessionCwd,
+          sessionId: meta.sessionId,
+          sinceMs: state.startedMs - 2000,
+          destDir: runOut,
+          seenSources,
+        }),
+      ];
+
+      for (const f of harvested) {
+        const gallery = path.join(
+          cfg.outputs,
+          `${id.slice(0, 8)}-${safeName(path.basename(f))}`,
+        );
+        if (!fs.existsSync(gallery)) fs.copyFileSync(f, gallery);
+      }
+
+      if (meta.status === "budget_exceeded") {
+        // keep
+      } else if (signal === "SIGTERM" || signal === "SIGKILL") {
+        meta.status = "cancelled";
+      } else {
+        meta.status = code === 0 ? "completed" : "failed";
+      }
+      meta.exitCode = code;
+      meta.signal = signal || null;
+      meta.finishedAt = Date.now();
+      meta.outputs = listMediaInDir(runOut, cfg.data);
+      meta.turnCount = state.turnCount;
+      meta.budget = budget.status();
+      writeMeta(runDir, meta);
+
+      const costUsd = budget.status().actualCostUsd;
+      recordRunUsage(cfg.data, {
+        runId: id,
+        sessionId: chatSessionId || null,
+        turns: Math.max(1, state.turnCount || 1),
+        costUsd: costUsd != null ? costUsd : undefined,
+        status: meta.status,
+      });
+
+      if (state.background) {
+        finishBackgroundJob(cfg.data, id, {
+          status: meta.status,
+          summary: state.textAcc.slice(0, 280),
+        });
+      }
+
+      log.info("run.finish", {
+        id,
+        status: meta.status,
+        exitCode: code,
+        outputs: meta.outputs.length,
+        sessionId: meta.sessionId,
+        turns: meta.turnCount,
+        transport: meta.transport,
+      });
+
+      broadcast({
+        type: "studio",
+        event: "finished",
+        exitCode: code,
+        signal: signal || null,
+        status: meta.status,
+        outputs: meta.outputs,
+        sessionId: meta.sessionId,
+        turnCount: meta.turnCount,
+        budget: meta.budget,
+      });
+
+      state.status = meta.status;
+      state.proc = null;
+      state.acpHandle = null;
+      if (typeof onFinish === "function") {
+        onFinish({
+          meta,
+          text: state.textAcc,
+          thoughts: state.thoughtAcc,
+          events: state.events,
+        });
+      }
+      finishClients(state, 400);
+    };
+
+    // Interactive permission modes → ACP (session/request_permission).
+    // Headless streaming-json cannot prompt; stdin was ignored.
+    const useAcp =
+      !sshConn &&
+      (interactive === true ||
+        (interactive !== false && needsInteractiveApprovals(resolvedMode)));
+
+    if (useAcp) {
+      meta.transport = "acp";
+      meta.args = ["agent", "stdio", ...(model ? ["-m", model] : [])];
+      writeMeta(runDir, meta);
+      broadcast({
+        type: "studio",
+        event: "transport",
+        transport: "acp",
+        permissionMode: resolvedMode,
+      });
+
+      const handle = runAcpTurn({
+        grokBin: cfg.grokBin,
+        cwd: workDir,
+        env: spawnEnv,
+        model: model || undefined,
+        permissionMode: resolvedMode || "default",
+        prompt: finalPrompt,
+        attachments: staged.map((p) => ({ path: p, name: path.basename(p) })),
+        onEvent: (evt) => {
+          handleStreamEvent(evt);
+        },
+      });
+      state.acpHandle = handle;
+      // Synthetic proc-like for cancel compatibility
+      state.proc = {
+        kill(sig) {
+          handle.cancel();
+          handle.client.kill(sig || "SIGTERM");
+        },
+        killed: false,
+      };
+
+      handle.done.then(
+        () => {
+          if (meta.status === "budget_exceeded") {
+            finalizeRun(1, null);
+          } else {
+            finalizeRun(0, null);
+          }
+        },
+        (err) => {
+          if (meta.status !== "budget_exceeded" && meta.status !== "cancelled") {
+            meta.error = err.message;
+            broadcast({ type: "error", message: err.message });
+          }
+          finalizeRun(1, null);
+        },
+      );
+
+      return { id, meta };
+    }
+
+    meta.transport = "headless";
+    writeMeta(runDir, meta);
 
     let proc;
     if (sshConn) {
@@ -666,16 +920,7 @@ export function createRunManager(cfg, log) {
           broadcast({ type: "studio", event: "raw", data: line });
           continue;
         }
-        if (evt.type === "text" && evt.data) state.textAcc += evt.data;
-        if (evt.type === "thought" && evt.data) state.thoughtAcc += evt.data;
-        if (evt.type === "tool_call" || evt.type === "tool") {
-          state.turnCount += 1;
-          meta.turnCount = state.turnCount;
-        }
-        if (evt.type === "end" && evt.sessionId) {
-          meta.sessionId = evt.sessionId;
-        }
-        broadcast(evt);
+        handleStreamEvent(evt);
       }
     });
 
@@ -705,94 +950,12 @@ export function createRunManager(cfg, log) {
       if (stdoutBuf.trim()) {
         try {
           const evt = JSON.parse(stdoutBuf.trim());
-          if (evt.type === "text" && evt.data) state.textAcc += evt.data;
-          if (evt.type === "thought" && evt.data) state.thoughtAcc += evt.data;
-          if (evt.type === "end" && evt.sessionId) meta.sessionId = evt.sessionId;
-          broadcast(evt);
+          handleStreamEvent(evt);
         } catch {
           broadcast({ type: "studio", event: "raw", data: stdoutBuf.trim() });
         }
       }
-
-      const seenSources = new Set();
-      const sessionCwd = sshConn ? cfg.root : meta.cwd || cfg.root;
-      const harvested = [
-        ...harvestFromText(state.textAcc, runOut, seenSources),
-        ...harvestFromSession({
-          sessionsRoot: cfg.sessionsRoot,
-          cwd: sessionCwd,
-          sessionId: meta.sessionId,
-          sinceMs: state.startedMs - 2000,
-          destDir: runOut,
-          seenSources,
-        }),
-      ];
-
-      for (const f of harvested) {
-        const gallery = path.join(
-          cfg.outputs,
-          `${id.slice(0, 8)}-${safeName(path.basename(f))}`,
-        );
-        if (!fs.existsSync(gallery)) fs.copyFileSync(f, gallery);
-      }
-
-      if (signal === "SIGTERM" || signal === "SIGKILL") {
-        meta.status = "cancelled";
-      } else {
-        meta.status = code === 0 ? "completed" : "failed";
-      }
-      meta.exitCode = code;
-      meta.signal = signal || null;
-      meta.finishedAt = Date.now();
-      meta.outputs = listMediaInDir(runOut, cfg.data);
-      meta.turnCount = state.turnCount;
-      writeMeta(runDir, meta);
-
-      recordRunUsage(cfg.data, {
-        runId: id,
-        sessionId: chatSessionId || null,
-        turns: Math.max(1, state.turnCount || 1),
-        status: meta.status,
-      });
-
-      if (state.background) {
-        finishBackgroundJob(cfg.data, id, {
-          status: meta.status,
-          summary: state.textAcc.slice(0, 280),
-        });
-      }
-
-      log.info("run.finish", {
-        id,
-        status: meta.status,
-        exitCode: code,
-        outputs: meta.outputs.length,
-        sessionId: meta.sessionId,
-        turns: meta.turnCount,
-      });
-
-      broadcast({
-        type: "studio",
-        event: "finished",
-        exitCode: code,
-        signal: signal || null,
-        status: meta.status,
-        outputs: meta.outputs,
-        sessionId: meta.sessionId,
-        turnCount: meta.turnCount,
-      });
-
-      state.status = meta.status;
-      state.proc = null;
-      if (typeof onFinish === "function") {
-        onFinish({
-          meta,
-          text: state.textAcc,
-          thoughts: state.thoughtAcc,
-          events: state.events,
-        });
-      }
-      finishClients(state, 400);
+      finalizeRun(code, signal);
     });
 
     return { id, meta };
@@ -855,19 +1018,96 @@ export function createRunManager(cfg, log) {
       throw err;
     }
     const state = active.get(id);
-    if (!state?.proc) {
+    if (!state?.proc && !state?.acpHandle) {
       const err = new Error("not running");
       err.status = 404;
       throw err;
     }
     log.info("run.cancel", { id });
-    state.proc.kill("SIGTERM");
-    // escalate if needed
-    setTimeout(() => {
-      if (state.proc && !state.proc.killed) {
-        state.proc.kill("SIGKILL");
+    state.meta.status = "cancelled";
+    if (state.acpHandle) {
+      state.acpHandle.cancel();
+    }
+    if (state.proc) {
+      state.proc.kill("SIGTERM");
+      setTimeout(() => {
+        if (state.proc && !state.proc.killed) {
+          state.proc.kill("SIGKILL");
+        }
+      }, 3000);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Respond to a pending ACP permission request for a live run.
+   */
+  function respondPermission(runId, permissionId, decision) {
+    if (!isUuid(runId)) {
+      const err = new Error("invalid run id");
+      err.status = 400;
+      throw err;
+    }
+    const state = active.get(runId);
+    if (!state?.acpHandle) {
+      const err = new Error("run is not an interactive ACP run or not live");
+      err.status = 404;
+      throw err;
+    }
+    const optionId =
+      decision?.optionId ||
+      decision?.option ||
+      (decision?.allow
+        ? (state.pendingPermissions.get(String(permissionId))?.options || []).find(
+            (o) =>
+              o.kind === "allow_once" ||
+              o.kind === "allow_always" ||
+              /allow/i.test(o.name || o.optionId || ""),
+          )?.optionId
+        : null);
+    if (decision?.deny || decision?.cancelled) {
+      state.acpHandle.respondPermission(permissionId, {
+        outcome: "cancelled",
+        cancelled: true,
+      });
+    } else {
+      if (!optionId) {
+        // Prefer first option that looks like allow
+        const opts =
+          state.pendingPermissions.get(String(permissionId))?.options || [];
+        const allowOpt =
+          opts.find((o) => o.kind === "allow_once" || o.kind === "allow_always") ||
+          opts[0];
+        if (!allowOpt?.optionId) {
+          const err = new Error("optionId required to approve");
+          err.status = 400;
+          throw err;
+        }
+        state.acpHandle.respondPermission(permissionId, {
+          outcome: "selected",
+          optionId: allowOpt.optionId,
+        });
+      } else {
+        state.acpHandle.respondPermission(permissionId, {
+          outcome: "selected",
+          optionId,
+        });
       }
-    }, 3000);
+    }
+    state.pendingPermissions.delete(String(permissionId));
+    const payload = {
+      type: "studio",
+      event: "permission_resolved",
+      id: permissionId,
+      decision,
+    };
+    state.events.push(payload);
+    if (!state.logStream.destroyed) {
+      state.logStream.write(JSON.stringify(payload) + "\n");
+    }
+    for (const res of state.clients) {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    }
     return { ok: true };
   }
 
@@ -879,6 +1119,7 @@ export function createRunManager(cfg, log) {
     startRun,
     attachStream,
     cancel,
+    respondPermission,
     reconcileStaleRuns,
     isLive,
     getActiveRunForSession,

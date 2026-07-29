@@ -71,6 +71,13 @@ import {
   listNotifications,
 } from "./lib/background.js";
 import { describeProvider } from "./lib/providers.js";
+import {
+  createWorktree,
+  listWorktrees,
+  removeWorktree,
+  isGitRepo,
+} from "./lib/worktrees.js";
+import { needsInteractiveApprovals } from "./lib/acp-client.js";
 
 /**
  * Build the Express app. Exportable for tests without listening.
@@ -197,6 +204,18 @@ export function createApp(overrides = {}) {
         body.sshConnectionId != null
           ? body.sshConnectionId
           : s.ssh?.defaultConnectionId || null,
+      worktree:
+        body.worktree != null
+          ? Boolean(body.worktree)
+          : Boolean(s.worktree?.default),
+      worktreeName:
+        body.worktreeName != null
+          ? String(body.worktreeName)
+          : s.worktree?.name || null,
+      interactive:
+        body.interactive != null
+          ? Boolean(body.interactive)
+          : needsInteractiveApprovals(permissionMode),
     };
   }
 
@@ -628,10 +647,66 @@ export function createApp(overrides = {}) {
     }
   });
 
+  app.post("/api/runs/:id/permissions/:permId", (req, res) => {
+    try {
+      const decision = req.body || {};
+      res.json(
+        runs.respondPermission(req.params.id, req.params.permId, decision),
+      );
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/runs/reconcile", (_req, res) => {
     const result = runs.reconcileStaleRuns();
     log.info("runs.reconcile", { count: result.reconciled.length });
     res.json(result);
+  });
+
+  // ── Worktrees ────────────────────────────────────────────────────
+  app.get("/api/worktrees", (req, res) => {
+    const cwd = projectCwdFromReq(req);
+    if (!cwd) {
+      res.json({ worktrees: [], git: false });
+      return;
+    }
+    res.json({
+      git: isGitRepo(cwd),
+      worktrees: listWorktrees(cwd),
+      cwd,
+    });
+  });
+
+  app.post("/api/worktrees", (req, res) => {
+    try {
+      const cwd = projectCwdFromReq(req) || req.body?.cwd;
+      if (!cwd) {
+        res.status(400).json({ error: "project cwd required" });
+        return;
+      }
+      const wt = createWorktree(cwd, {
+        name: req.body?.name,
+        baseRef: req.body?.baseRef,
+      });
+      log.info("worktree.create", { path: wt.path, name: wt.name });
+      res.status(201).json(wt);
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message, code: e.code });
+    }
+  });
+
+  app.delete("/api/worktrees/:name", (req, res) => {
+    try {
+      const cwd = projectCwdFromReq(req) || req.body?.cwd;
+      if (!cwd) {
+        res.status(400).json({ error: "project cwd required" });
+        return;
+      }
+      res.json(removeWorktree(cwd, req.params.name));
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
   });
 
   // ── Settings (user / project / local) ─────────────────────────────

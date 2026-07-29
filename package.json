@@ -1,6 +1,6 @@
 {
   "name": "grok-studio",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Native macOS coding agent for Grok Build — multi-session chat, permission modes, keybindings, SSH, subagents, checkpoints",
   "private": true,
   "type": "module",

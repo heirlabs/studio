@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grok Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✦</text></svg>" />
+  </head>
+  <body>
+    <div class="drag-strip" aria-hidden="true"></div>
+    <div class="shell">
+      <!-- Left session drawer -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-top">
+          <div class="sidebar-brand">
+            <span class="mark">✦</span>
+            <span class="sidebar-title">Grok Studio</span>
+          </div>
+          <div class="sidebar-tabs">
+            <button type="button" class="tab active" data-tab="code">Code</button>
+          </div>
+          <button type="button" class="btn-new" id="btn-new-session">+ New chat</button>
+        </div>
+
+        <div class="sidebar-section-label">Sessions</div>
+        <div class="session-list" id="session-list"></div>
+
+        <div class="sidebar-foot">
+          <div class="project-mini">
+            <span class="muted tiny">Project</span>
+            <button type="button" class="project-path-btn" id="btn-project" title="Change project">
+              <span id="project-label">Select project…</span>
+            </button>
+            <input type="hidden" id="project-cwd" />
+          </div>
+          <div class="status-pill" id="health" title="">
+            <span class="dot"></span>
+            <span id="health-text">…</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main chat column -->
+      <main class="main">
+        <header class="chat-header">
+          <div class="chat-header-left">
+            <h1 id="chat-title">New chat</h1>
+            <span class="badge idle" id="run-badge">idle</span>
+            <button type="button" class="mode-chip" id="perm-chip" title="Shift+Tab: cycle permission mode">
+              <span class="mode-label">mode</span>
+              <span id="perm-label">yolo</span>
+            </button>
+            <button type="button" class="mode-chip subtle" id="think-chip" title="Alt+T: toggle extended thinking">
+              <span id="think-label">think: high</span>
+            </button>
+          </div>
+          <div class="chat-header-right">
+            <button type="button" class="ghost" id="btn-history" title="History search (Ctrl+R)">⌕</button>
+            <button type="button" class="ghost" id="btn-transcript" title="Transcript viewer (Ctrl+O)">☰</button>
+            <button type="button" class="ghost" id="btn-checkpoint" title="Create checkpoint">⌘</button>
+            <button type="button" class="ghost" id="btn-settings" title="Settings (Ctrl+,)">⚙</button>
+            <button type="button" class="ghost native-only hidden" id="btn-open-native">Attach</button>
+            <button type="button" class="ghost native-only hidden" id="btn-reveal-out">Finder</button>
+            <button type="button" class="ghost danger hidden" id="btn-cancel">Stop</button>
+          </div>
+        </header>
+
+        <div class="transcript" id="transcript" aria-live="polite"></div>
+
+        <footer class="composer-wrap">
+          <div class="attach-row" id="attach-row"></div>
+
+          <div class="composer">
+            <div class="composer-toolbar">
+              <label class="wf-select-wrap">
+                <span class="sr-only">Workflow</span>
+                <select id="workflow-select"></select>
+              </label>
+              <div id="rhai-opts" class="rhai-opts hidden">
+                <select id="rhai-name"></select>
+                <input id="rhai-args" type="text" value="{}" placeholder="args JSON" />
+              </div>
+              <label class="check compact" title="Legacy alias for bypassPermissions">
+                <input type="checkbox" id="yolo" checked />
+                auto-approve
+              </label>
+              <label class="check compact" title="Run in background with notification">
+                <input type="checkbox" id="background" />
+                bg
+              </label>
+              <select id="model" class="model-input" title="Model"></select>
+              <select id="agent-select" class="agent-input" title="Agent profile">
+                <option value="">agent: default</option>
+              </select>
+              <select id="ssh-select" class="ssh-input" title="SSH remote">
+                <option value="">local</option>
+              </select>
+              <div class="media-opts" id="media-opts">
+                <select id="aspect" title="Aspect">
+                  <option value="auto">auto</option>
+                  <option value="1:1">1:1</option>
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                </select>
+                <select id="duration" title="Duration">
+                  <option value="6">6s</option>
+                  <option value="10">10s</option>
+                </select>
+                <select id="resolution" title="Res">
+                  <option value="480p">480p</option>
+                  <option value="720p">720p</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="composer-body">
+              <textarea
+                id="prompt"
+                rows="2"
+                placeholder="Describe the coding task… (Enter to send, Shift+Enter for newline)"
+              ></textarea>
+              <div class="composer-actions">
+                <button type="button" class="ghost" id="btn-attach" title="Attach images">＋</button>
+                <input type="file" id="file-input" accept="image/*" multiple hidden />
+                <button type="button" class="primary" id="btn-run" title="Send">
+                  Run
+                </button>
+              </div>
+            </div>
+            <div class="composer-hint muted tiny" id="composer-hint">
+              Local grok · Shift+Tab permissions · Ctrl+R history · Ctrl+O transcript · Alt+T thinking
+            </div>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="modal-root" class="modal-root hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="modal-backdrop"></div>
+      <div class="modal" id="modal" role="dialog" aria-modal="true">
+        <header class="modal-header">
+          <h2 id="modal-title">Modal</h2>
+          <button type="button" class="ghost" id="modal-close" title="Close">×</button>
+        </header>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Hidden drop target for whole-window drops -->
+    <div id="drop-overlay" class="drop-overlay hidden">Drop images to attach</div>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

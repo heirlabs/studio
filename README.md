@@ -1,0 +1,190 @@
+# Grok Studio
+
+Native **macOS coding app** (Electron) + local-only server for [Grok Build](https://github.com/xai-org/grok-build) (`grok`).
+
+**Primary job: software engineering** — open a project folder, pick a coding workflow (agent, review, fix, implement, tests…), run real headless `grok` with tools (edit, shell, search). Screenshots/mocks are optional attachments; media workflows live under a secondary panel.
+
+Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
+
+| Feature | How |
+|---------|-----|
+| Permission modes | Shift+Tab cycles `default` → `acceptEdits` → `plan` → `auto` → `dontAsk` → `bypassPermissions` → passed as `--permission-mode` |
+| Multi-model | Model list from `~/.grok/models_cache.json`; selection rules; `-m` |
+| Extended thinking | Alt+T cycles effort / off → `--reasoning-effort` |
+| Keybindings | 17 contexts; multi-stroke chords; `~/.grok-studio/keybindings.json`; two hardcoded (`forceCancel`, `emergencyStop`) |
+| Transcript viewer | Ctrl+O; markdown export |
+| History search | Ctrl+R reverse search over user prompts |
+| Subagents | Agent defs from `.grok/agents/`, `~/.grok/agents/`, bundled; `--agent` |
+| SSH remote | Connection profiles; scp prompt + `ssh` run of remote `grok` |
+| Background runs | Job ledger + notification hooks (Electron `Notification`) |
+| Budget / turns | `--max-turns`; daily USD cap (local ledger estimates) |
+| Sandbox | `--sandbox` + allow/deny rules |
+| Checkpoints | Pre-run + manual snapshots; restore messages |
+| Providers | Gateway / API base URL → env for child `grok` |
+| Settings scopes | user (`~/.grok-studio/settings.json`) · project (`.grok-studio/settings.json`) · local (`data/settings.local.json`) |
+
+**Binds only to `127.0.0.1`.** Non-loopback clients get `403`.
+
+## Requirements
+
+- macOS 12+
+- Node.js 18+ (for build / browser mode)
+- Grok Build CLI authenticated (`grok` on PATH or `~/.grok/bin/grok`)
+- Same credentials you already use for the TUI (`grok login` or `XAI_API_KEY`)
+
+## macOS app (recommended)
+
+```bash
+cd ~/grok-studio
+npm install
+npm run app          # launch desktop app (dev)
+npm run dist         # build Grok Studio.app → release/mac*/
+npm run dist:dmg     # also produce a .dmg
+```
+
+Open **`release/mac-arm64/Grok Studio.app`** (or `mac/` / `mac-x64/` depending on CPU).
+
+You can drag the `.app` into **Applications**. First launch may need right-click → Open (unsigned local build).
+
+**Native features**
+
+- Real window + dock icon (not a browser tab)
+- **⌘O** → Open **Project** folder (required cwd for coding runs)
+- **⌘⇧O** → Attach screenshots/mocks (optional)
+- Coding workflows first: Code Agent, Review Diff, Fix Bug, Implement, Refactor, Tests, Explain, PR/Range
+- Media fold for optional Imagine jobs
+- Drop images on the dock icon or into Attachments
+- **Finder** + right-click media outs → Reveal
+- Data: `~/Library/Application Support/grok-studio/data/`
+- Single-instance lock; ephemeral localhost port
+
+## Browser mode (still works)
+
+```bash
+npm start
+# → http://127.0.0.1:3847
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GROK_STUDIO_PORT` | `3847` | Browser-mode listen port |
+| `GROK_BIN` | auto-detect | Path to `grok` |
+
+## Architecture
+
+```
+server/
+  index.js          # listen + shutdown
+  app.js            # createApp() — used by tests
+  lib/
+    config.js       # paths, loopback, uuid, grok bin
+    catalog.js      # workflow catalog + rhai scan
+    template.js     # prompt template + safeName
+    media.js        # list/copy/harvest session + text
+    runs.js         # spawn grok, SSE, cancel, concurrency, CLI flags
+    sessions.js     # multi-tab chat + history search + restore
+    permissions.js  # mode cycle + CLI mapping
+    models.js       # catalog + selection rules
+    keybindings.js  # 17 contexts + load/save/resolve
+    settings.js     # user / project / local layers
+    agents.js       # agent definition discovery
+    ssh.js          # remote profiles + scp/ssh spawn
+    checkpoints.js  # session snapshots
+    budget.js       # daily spend + turn accounting
+    sandbox.js      # profiles + tool policy
+    background.js   # background jobs + notification hooks
+    providers.js    # gateway env routing
+    projects.js     # recent project cwd
+    logger.js
+public/             # static UI (chat, modals, shortcuts)
+electron/           # native shell + notifications
+workflows/catalog.json
+test/
+  unit/             # pure + filesystem tests
+  integration/      # real HTTP + fake-grok child process
+  fixtures/fake-grok.mjs
+data/
+  uploads/ outputs/ runs/<uuid>/ chat-sessions/ checkpoints/
+```
+
+Each run:
+
+1. Optional pre-run checkpoint of the chat session
+2. Stages selected images into `data/runs/<id>/`
+3. Writes `prompt.txt` with `@/abs/path` attachments + workflow template
+4. Builds CLI args (`--permission-mode`, `-m`, `--max-turns`, `--sandbox`, `--agent`, …)
+5. Spawns local `grok` or remote `ssh … grok` with streaming-json
+6. Streams NDJSON → SSE clients; appends `events.jsonl`
+7. On exit: harvest media, record budget usage, finish background job hooks
+
+## Workflows
+
+| ID | Needs images | Real tools instructed |
+|----|--------------|------------------------|
+| Image Edit | ≥1 | `image_edit` |
+| Image Generate | 0 | `image_gen` |
+| Image → Video | ≥1 | `image_to_video` |
+| Multi-ref Video | ≥2 | compose + animate |
+| Character Sheet | 0+ | gen + edit consistency |
+| Style Transfer | ≥2 | multi-ref `image_edit` |
+| Game Sprite / UI | 0+ | game asset skills |
+| Freeform Agent | 0+ | full agent |
+| Saved Rhai Workflow | 0+ | `workflow` tool |
+
+Edit `workflows/catalog.json` to add templates (`{{prompt}}`, `{{images}}`, `{{#if images}}…{{/if}}`).
+
+## Shortcuts (defaults)
+
+| Chord | Action |
+|-------|--------|
+| Shift+Tab | Cycle permission mode |
+| Ctrl+R | History search |
+| Ctrl+O | Transcript viewer |
+| Alt+T | Toggle / cycle thinking effort |
+| Ctrl+C | Cancel current run |
+| Ctrl+, | Settings |
+| Ctrl+/ | Keybindings help |
+| Ctrl+N | New session |
+| Ctrl+Shift+C | Checkpoints |
+
+Customize: `~/.grok-studio/keybindings.json` (or `data/keybindings.json`).
+
+## Tests
+
+```bash
+npm test
+```
+
+- **Unit**: template, media, config, permissions, keybindings (incl. chord sequences), models, settings, budget (daily + session turns), sandbox, agents, checkpoints, background, ssh, providers, `buildGrokArgs`, sessions (attach/fail/restore/history order), `resolveProjectCwd`
+- **Integration**: HTTP on ephemeral port, real multer uploads, fake-grok child for pong/image/session-image/cancel/concurrency, budget 429, invalid permission marks assistant error, keybindings validation, provider, agents CRUD, model select — **no mocks of app code**
+
+## Safety / ops
+
+- Loopback-only bind + middleware reject
+- UUID validation on run IDs (no path traversal)
+- Upload path confined to `data/uploads`
+- Max concurrent runs default `3` (429 when exceeded)
+- Daily budget cap (local estimate ledger) returns 429 when exceeded
+- Cancel sends SIGTERM then SIGKILL after 3s
+- Permission modes / sandbox / allow-deny rules passed through to Grok
+- Structured stdout logs with timestamps
+- No secrets in repo; uses your existing `~/.grok/auth.json` / `XAI_API_KEY`
+- Rollback: stop process; delete `data/runs` / `data/outputs` / checkpoints if needed; app is stateless beyond disk
+
+### Known limits (honest)
+
+- **Budget USD** is a local estimate (`$0.05`/turn default), not xAI billing — enforced before spawn, not mid-turn
+- **SSH remote runs** use `scp` + `ssh` BatchMode; live connectivity is not CI-tested (no remote host in suite)
+- **Subagents** are Grok’s own `spawn_subagent` / `--agent` profiles — Studio surfaces definitions and flags, does not reimplement the agent loop
+- **`forwardSubagentText`** is a settings field for parity only; Grok CLI has no `--forward-subagent-text` flag
+- **Screen control** (OS-level UI automation) is out of scope for this app
+- **Agent loop** is the real Grok CLI process (tool request → execute → stream); Studio is the desktop shell + orchestration, not a reimplementation of the model
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Health red | `grok login` or set `XAI_API_KEY`; check `GROK_BIN` |
+| 429 on Run | Wait for active runs or raise concurrency in `createConfig` |
+| Empty gallery | Agent must produce files; check `data/runs/<id>/events.jsonl` and session `images/` |
+| Port in use | `GROK_STUDIO_PORT=3848 npm start` |

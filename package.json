@@ -1,0 +1,88 @@
+{
+  "name": "grok-studio",
+  "version": "1.5.0",
+  "description": "Native macOS coding agent for Grok Build — multi-session chat, permission modes, keybindings, SSH, subagents, checkpoints",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "author": "local",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "app": "electron .",
+    "app:dev": "electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "npm run icon && electron-builder --mac dir",
+    "dist:dmg": "npm run icon && electron-builder --mac dmg",
+    "pack": "npm run dist",
+    "test": "node --test --test-concurrency=1 test/unit/*.test.js test/integration/*.test.js",
+    "test:unit": "node --test --test-concurrency=1 test/unit/*.test.js",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.js",
+    "audit": "npm audit --omit=dev"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "5.1.0",
+    "multer": "2.2.0"
+  },
+  "devDependencies": {
+    "electron": "36.4.0",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "com.local.grok-studio",
+    "productName": "Grok Studio",
+    "copyright": "Local use only",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "public/**/*",
+      "workflows/**/*",
+      "package.json",
+      "!**/*.test.js",
+      "!test/**/*",
+      "!data/**/*",
+      "!release/**/*"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "electron/icon.icns",
+      "target": ["dir", "dmg"],
+      "darkModeSupport": true,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "extendInfo": {
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeName": "Image",
+            "CFBundleTypeRole": "Viewer",
+            "LSItemContentTypes": [
+              "public.png",
+              "public.jpeg",
+              "public.tiff",
+              "public.heic",
+              "org.webmproject.webp",
+              "com.compuserve.gif"
+            ]
+          }
+        ],
+        "NSHighResolutionCapable": true
+      }
+    },
+    "dmg": {
+      "title": "Grok Studio"
+    },
+    "asar": true
+  }
+}

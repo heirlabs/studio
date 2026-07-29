@@ -1,0 +1,136 @@
+{
+  "workflows": [
+    {
+      "id": "code-agent",
+      "name": "Code Agent",
+      "icon": "⌘",
+      "category": "code",
+      "description": "Full coding agent in your project — edit, run, test, search.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are Grok Build working as a coding agent in this project.\n\nProject cwd: {{cwd}}\n\n{{#if images}}Attached screenshots / mocks (absolute paths — use as visual context):\n{{images}}\n{{/if}}\n\nTask:\n{{prompt}}\n\nRules:\n- Inspect the real tree with list_dir / grep / read_file before changing anything.\n- Prefer the smallest correct change; do not refactor unrelated code.\n- Run relevant tests or typechecks after edits when the repo has them.\n- Never invent files that are not there; if blocked, say what you need.\n- When finished, summarize: files touched, commands run, and how to verify."
+    },
+    {
+      "id": "review-diff",
+      "name": "Review Diff",
+      "icon": "👁",
+      "category": "code",
+      "description": "Review git changes for bugs, risks, and missing tests.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are reviewing code changes in a real git checkout.\n\nProject cwd: {{cwd}}\n\nTask / scope from user:\n{{prompt}}\n\nDo this:\n1. Run `git status` and `git diff` (and `git diff --staged` if needed). If the user named a branch/range, use that.\n2. Read every changed file region that matters — do not review from memory.\n3. Report concrete findings: severity, file:line, what's wrong, suggested fix.\n4. Call out missing tests, security issues, and behavior regressions first.\n5. If the diff is empty, say so and stop.\n\nOutput a structured review. Do not rewrite the whole PR unless asked."
+    },
+    {
+      "id": "fix-bug",
+      "name": "Fix Bug",
+      "icon": "🔧",
+      "category": "code",
+      "description": "Reproduce, root-cause, patch, and verify with tests.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are fixing a bug in a real codebase.\n\nProject cwd: {{cwd}}\n\n{{#if images}}Screenshots / error images:\n{{images}}\n{{/if}}\n\nBug report:\n{{prompt}}\n\nProcess:\n1. Locate the failing path (grep, tests, stack traces, recent diffs).\n2. Form a root cause with evidence from the code — not guesses.\n3. Implement the minimal fix.\n4. Add or update a test when practical; run the focused test suite.\n5. Summarize root cause, fix, and verification commands.\n\nDo not paper over the bug with broad try/catch unless that is truly correct."
+    },
+    {
+      "id": "implement",
+      "name": "Implement",
+      "icon": "🛠",
+      "category": "code",
+      "description": "Implement a feature or change end-to-end in the repo.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are implementing a feature in a real project.\n\nProject cwd: {{cwd}}\n\n{{#if images}}Design mocks / references:\n{{images}}\n{{/if}}\n\nSpec:\n{{prompt}}\n\nProcess:\n1. Map existing patterns (similar features, routing, tests, config).\n2. Implement fully — no stubs, TODOs, or half-wired UI.\n3. Match project conventions (naming, file layout, error handling).\n4. Wire tests if the area is tested; run them.\n5. Summarize files changed and how to try the feature.\n\nPrefer simple correct code over speculative architecture."
+    },
+    {
+      "id": "refactor",
+      "name": "Refactor",
+      "icon": "♻",
+      "category": "code",
+      "description": "Safe structural cleanup with behavior preserved.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are refactoring code without changing intended behavior.\n\nProject cwd: {{cwd}}\n\nGoal:\n{{prompt}}\n\nRules:\n- Establish baseline tests or a manual check first when possible.\n- Refactor in small steps; keep public APIs stable unless asked otherwise.\n- Delete dead code only when you have proven it is unused.\n- Re-run tests after.\n- Summarize what improved (structure, duplication, clarity) and residual risk."
+    },
+    {
+      "id": "tests",
+      "name": "Tests",
+      "icon": "✓",
+      "category": "code",
+      "description": "Add, fix, or improve tests for real behavior.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are improving tests in a real project.\n\nProject cwd: {{cwd}}\n\nRequest:\n{{prompt}}\n\nRules:\n- Discover the project's test runner and conventions before writing.\n- Test real behavior and edge cases; do not mock away the code under test.\n- Prefer focused unit/integration tests over brittle e2e unless asked.\n- Run the new/changed tests and fix failures.\n- Summarize coverage intent and commands to re-run."
+    },
+    {
+      "id": "explain",
+      "name": "Explain",
+      "icon": "?",
+      "category": "code",
+      "description": "Read-only tour of how a module or flow actually works.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are explaining a real codebase (prefer read-only tools).\n\nProject cwd: {{cwd}}\n\nQuestion:\n{{prompt}}\n\nRules:\n- Open the actual files; do not answer from assumptions.\n- Explain control flow, key types, and failure modes with file paths.\n- Call out dead code or misleading names if you find them.\n- Keep it concise and structured. Do not edit files unless the user asked for fixes."
+    },
+    {
+      "id": "pr-review",
+      "name": "PR / Range",
+      "icon": "≡",
+      "category": "code",
+      "description": "Review a branch, commit range, or PR description against the code.",
+      "requiresImages": 0,
+      "tools": [],
+      "defaults": {},
+      "promptTemplate": "You are doing a pull-request style review against real git history.\n\nProject cwd: {{cwd}}\n\nWhat to review (branch, range, PR notes):\n{{prompt}}\n\nSteps:\n1. Resolve the diff (`git log`, `git diff base...head`, or gh if available).\n2. Read the changed code and adjacent call sites.\n3. Findings first (bugs, security, perf, missing tests), then nits.\n4. Explicitly say what looks good if the change is solid.\n5. Do not push or open a PR unless asked."
+    },
+    {
+      "id": "rhai-workflow",
+      "name": "Saved Workflow",
+      "icon": "⚙",
+      "category": "code",
+      "description": "Launch a user/project .rhai multi-agent workflow by name.",
+      "requiresImages": 0,
+      "tools": ["workflow"],
+      "defaults": {},
+      "promptTemplate": "Launch a real Grok workflow (Rhai) with the workflow tool — not a simulation.\n\nProject cwd: {{cwd}}\nWorkflow name: {{workflow_name}}\nArgs JSON: {{workflow_args}}\n\n{{#if images}}Related attachments:\n{{images}}\n{{/if}}\n\nExtra instruction:\n{{prompt}}\n\nCall the workflow tool. Report display name and final result. If missing, list ~/.grok/workflows and .grok/workflows under the project."
+    },
+    {
+      "id": "image-edit",
+      "name": "Image Edit",
+      "icon": "🖼",
+      "category": "media",
+      "description": "Optional: edit a screenshot/mock with image_edit.",
+      "requiresImages": 1,
+      "tools": ["image_edit"],
+      "defaults": { "aspect_ratio": "auto" },
+      "promptTemplate": "Load the imagine skill. Edit attached images with image_edit.\n\nSources:\n{{images}}\n\nRequest:\n{{prompt}}\n\nAspect: {{aspect_ratio}}\nCall the tool for real. Report OUTPUT: <absolute path>."
+    },
+    {
+      "id": "image-gen",
+      "name": "Image Gen",
+      "icon": "🎨",
+      "category": "media",
+      "description": "Optional: generate an image (mocks, assets).",
+      "requiresImages": 0,
+      "tools": ["image_gen", "image_edit"],
+      "defaults": { "aspect_ratio": "1:1" },
+      "promptTemplate": "Load the imagine skill. Generate with image_gen (or image_edit if refs attached).\n\n{{#if images}}Refs:\n{{images}}\n{{/if}}\n\nRequest:\n{{prompt}}\n\nAspect: {{aspect_ratio}}\nReport OUTPUT: <absolute path>."
+    },
+    {
+      "id": "image-to-video",
+      "name": "Image → Video",
+      "icon": "▶",
+      "category": "media",
+      "description": "Optional: animate a still with image_to_video.",
+      "requiresImages": 1,
+      "tools": ["image_to_video"],
+      "defaults": { "duration": "6", "resolution": "480p" },
+      "promptTemplate": "Load the imagine skill. Animate with image_to_video.\n\nSource:\n{{images}}\n\nMotion:\n{{prompt}}\n\nDuration: {{duration}}s · Resolution: {{resolution}}\nReport OUTPUT: <absolute path>."
+    }
+  ]
+}

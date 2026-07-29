@@ -1,0 +1,11 @@
+node_modules/
+data/uploads/*
+data/outputs/*
+data/runs/*
+!data/uploads/.gitkeep
+!data/outputs/.gitkeep
+!data/runs/.gitkeep
+release/
+dist/
+.DS_Store
+*.log

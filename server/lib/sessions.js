@@ -65,6 +65,7 @@ function toSummary(session) {
     messageCount: (session.messages || []).length,
     pinned: Boolean(session.pinned),
     lastPreview: session.lastPreview || "",
+    activeRunId: session.activeRunId || null,
   };
 }
 
@@ -114,6 +115,7 @@ export function createSession(dataDir, { title, cwd, workflowId } = {}) {
     pinned: false,
     lastPreview: "",
     grokSessionId: null,
+    activeRunId: null,
     messages: [],
     runIds: [],
   };
@@ -134,10 +136,34 @@ export function updateSession(dataDir, id, patch) {
   if (patch.workflowId != null) session.workflowId = patch.workflowId;
   if (patch.pinned != null) session.pinned = Boolean(patch.pinned);
   if (patch.grokSessionId != null) session.grokSessionId = patch.grokSessionId;
+  if (patch.activeRunId !== undefined) {
+    session.activeRunId = patch.activeRunId || null;
+  }
   session.updatedAt = Date.now();
   writeSession(dataDir, session);
   touchIndex(dataDir, session, false);
   return session;
+}
+
+/**
+ * Mark the live run for a session (for GUI reattachment after switch).
+ */
+export function setSessionActiveRun(dataDir, id, runId) {
+  return updateSession(dataDir, id, { activeRunId: runId || null });
+}
+
+/**
+ * Find the most recent assistant message still marked running.
+ */
+export function findRunningAssistant(session) {
+  if (!session?.messages?.length) return null;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i];
+    if (m.role === "assistant" && m.status === "running" && m.runId) {
+      return m;
+    }
+  }
+  return null;
 }
 
 export function setActiveSession(dataDir, id) {

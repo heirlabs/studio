@@ -513,14 +513,19 @@ function renderSessionList() {
   }
   for (const s of state.sessions) {
     const btn = document.createElement("div");
+    const isRunning = Boolean(s.activeRunId);
     btn.className =
-      "session-item" + (s.id === state.activeSessionId ? " active" : "");
+      "session-item" +
+      (s.id === state.activeSessionId ? " active" : "") +
+      (isRunning ? " running" : "");
     btn.innerHTML = `
       <div class="s-row">
         <span class="s-title">${escapeHtml(s.title || "New chat")}</span>
         <button type="button" class="s-del" title="Delete" data-id="${s.id}">×</button>
       </div>
-      <div class="s-meta">${escapeHtml(shortPath(s.cwd || ""))}</div>
+      <div class="s-meta">${escapeHtml(shortPath(s.cwd || ""))}${
+        isRunning ? " · running" : ""
+      }</div>
     `;
     btn.addEventListener("click", (e) => {
       if (e.target.closest(".s-del")) return;
@@ -580,11 +585,42 @@ async function openSession(id) {
     syncModeUi();
   }
   $("#chat-title").textContent = session.title || "New chat";
-  setRunBadge("idle");
   renderTranscript(session.messages || []);
   renderSessionList();
   closeStream();
+
+  // Reattach to a live run when switching back to a busy session
+  const active = await api(`/api/sessions/${id}/active-run`).catch(() => null);
+  if (active?.live && active.runId) {
+    const msgId =
+      active.messageId ||
+      [...(session.messages || [])]
+        .reverse()
+        .find((m) => m.role === "assistant" && m.runId === active.runId)?.id;
+    state.runId = active.runId;
+    state.streamingMsgId = msgId || null;
+    setRunning(true);
+    setRunBadge("running");
+    streamRun(active.runId, msgId);
+    toast("Reattached to running agent", "ok");
+    return;
+  }
+
+  // Stale "running" assistant after process death — refresh from disk
+  const stale = [...(session.messages || [])]
+    .reverse()
+    .find((m) => m.role === "assistant" && m.status === "running");
+  if (stale?.runId) {
+    const detail = await api(`/api/runs/${stale.runId}`).catch(() => null);
+    if (detail?.meta?.status && detail.meta.status !== "running") {
+      await getSessionAndRender(detail.meta.status);
+    }
+  }
+
   setRunning(false);
+  setRunBadge("idle");
+  state.runId = null;
+  state.streamingMsgId = null;
 }
 
 // ── Transcript rendering ────────────────────────────
@@ -709,6 +745,36 @@ function renderMessage(msg) {
   return el;
 }
 
+function formatToolPayload(input, max = 240) {
+  if (input == null) return "";
+  let s;
+  if (typeof input === "string") s = input;
+  else {
+    try {
+      s = JSON.stringify(input, null, 0);
+    } catch {
+      s = String(input);
+    }
+  }
+  s = s.replace(/\s+/g, " ").trim();
+  if (s.length > max) return s.slice(0, max - 1) + "…";
+  return s;
+}
+
+function toolEventLabel(evt) {
+  if (typeof evt === "string") return { title: evt, detail: "" };
+  const name = evt.name || "tool";
+  const kind = evt.kind || "call";
+  const prefix =
+    kind === "result" ? "✓" : kind === "error" ? "!" : kind === "stderr" ? "⚠" : "▸";
+  const detail = evt.detail || "";
+  return {
+    title: `${prefix} ${name}`,
+    detail,
+    kind,
+  };
+}
+
 function updateStreamingAssistant(msgId, { text, thoughts, status, tools }) {
   const root = $("#transcript .transcript-inner");
   if (!root) return;
@@ -724,12 +790,22 @@ function updateStreamingAssistant(msgId, { text, thoughts, status, tools }) {
   const next = renderMessage(msg);
   if (tools?.length) {
     const wrap = next.querySelector(".msg-bubble");
+    const toolsHost = document.createElement("div");
+    toolsHost.className = "tool-events";
     for (const t of tools) {
+      const info = toolEventLabel(t);
       const div = document.createElement("div");
-      div.className = "tool-event";
-      div.textContent = t;
-      wrap?.insertBefore(div, wrap.querySelector(".prose"));
+      div.className = `tool-event tool-${info.kind || "call"}`;
+      div.innerHTML = `<div class="tool-title">${escapeHtml(info.title)}</div>${
+        info.detail
+          ? `<div class="tool-detail">${escapeHtml(info.detail)}</div>`
+          : ""
+      }`;
+      toolsHost.appendChild(div);
     }
+    const prose = wrap?.querySelector(".prose");
+    if (prose) wrap.insertBefore(toolsHost, prose);
+    else wrap?.appendChild(toolsHost);
   }
   el.replaceWith(next);
   $("#transcript").scrollTop = $("#transcript").scrollHeight;
@@ -737,18 +813,44 @@ function updateStreamingAssistant(msgId, { text, thoughts, status, tools }) {
 
 // ── Attachments ─────────────────────────────────────
 
+function isAttachableClientFile(f) {
+  if (!f) return false;
+  if (f.type?.startsWith("image/") || f.type?.startsWith("text/")) return true;
+  if (
+    /^(application\/(json|javascript|typescript|xml|x-yaml|yaml|x-sh|x-python))/i.test(
+      f.type || "",
+    )
+  ) {
+    return true;
+  }
+  return /\.(png|jpe?g|webp|gif|heic|avif|bmp|tiff?|txt|md|markdown|json|jsonl|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|swift|c|h|cpp|hpp|cs|php|html|css|scss|xml|ya?ml|toml|ini|cfg|conf|env|sh|bash|zsh|sql|graphql|vue|svelte|csv|log|diff|patch|lock)$/i.test(
+    f.name || "",
+  );
+}
+
 function renderAttachRow() {
   const row = $("#attach-row");
   row.innerHTML = "";
   for (const img of state.uploads) {
     if (!state.selected.has(img.name)) continue;
     const chip = document.createElement("div");
-    chip.className = "chip selected-on";
-    chip.innerHTML = `
-      <img src="${escapeHtml(img.url)}" alt="" />
-      <span>${escapeHtml(img.name.length > 24 ? img.name.slice(0, 20) + "…" : img.name)}</span>
-      <button type="button" class="x" title="Remove">×</button>
-    `;
+    chip.className = "chip selected-on" + (img.kind === "file" ? " chip-file" : "");
+    const label =
+      img.name.length > 28 ? img.name.slice(0, 24) + "…" : img.name;
+    if (img.kind === "file") {
+      const ext = (img.name.split(".").pop() || "file").slice(0, 4).toUpperCase();
+      chip.innerHTML = `
+        <div class="chip-file-icon">${escapeHtml(ext)}</div>
+        <span title="${escapeHtml(img.name)}">${escapeHtml(label)}</span>
+        <button type="button" class="x" title="Remove">×</button>
+      `;
+    } else {
+      chip.innerHTML = `
+        <img src="${escapeHtml(img.url)}" alt="" />
+        <span title="${escapeHtml(img.name)}">${escapeHtml(label)}</span>
+        <button type="button" class="x" title="Remove">×</button>
+      `;
+    }
     chip.querySelector(".x").addEventListener("click", async () => {
       state.selected.delete(img.name);
       await api(`/api/uploads/${encodeURIComponent(img.name)}`, {
@@ -762,7 +864,7 @@ function renderAttachRow() {
 
 async function refreshUploads() {
   const data = await api("/api/uploads");
-  state.uploads = data.images || [];
+  state.uploads = data.files || data.images || [];
   const names = new Set(state.uploads.map((i) => i.name));
   for (const n of [...state.selected]) {
     if (!names.has(n)) state.selected.delete(n);
@@ -771,12 +873,11 @@ async function refreshUploads() {
 }
 
 async function uploadFiles(fileList) {
-  const files = [...fileList].filter(
-    (f) =>
-      f.type.startsWith("image/") ||
-      /\.(png|jpe?g|webp|gif|heic|avif|bmp|tiff?)$/i.test(f.name),
-  );
-  if (!files.length) return;
+  const files = [...fileList].filter(isAttachableClientFile);
+  if (!files.length) {
+    toast("No attachable files (images or text/code)");
+    return;
+  }
   const fd = new FormData();
   for (const f of files) fd.append("files", f);
   const data = await api("/api/upload", { method: "POST", body: fd });
@@ -892,12 +993,14 @@ function streamRun(runId, assistantMsgId) {
   closeStream();
   let textAcc = "";
   let thoughtAcc = "";
+  /** @type {{name:string,kind:string,detail:string}[]} */
   const tools = [];
   const es = new EventSource(`/api/runs/${runId}/stream`);
   state.es = es;
   let finished = false;
 
   const paint = (status = "running") => {
+    if (!assistantMsgId) return;
     updateStreamingAssistant(assistantMsgId, {
       text: textAcc,
       thoughts: thoughtAcc,
@@ -906,8 +1009,19 @@ function streamRun(runId, assistantMsgId) {
     });
   };
 
+  const pushTool = (entry) => {
+    tools.push(entry);
+    // Cap UI list for long agent turns
+    if (tools.length > 80) tools.splice(0, tools.length - 80);
+  };
+
   es.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
     if (msg.type === "text" && msg.data) {
       textAcc += msg.data;
       paint("running");
@@ -915,17 +1029,69 @@ function streamRun(runId, assistantMsgId) {
       thoughtAcc += msg.data;
       paint("running");
     } else if (msg.type === "tool_call" || msg.type === "tool") {
-      const name = msg.name || msg.tool || msg.data?.name || "tool";
-      tools.push(`▸ ${name}`);
+      const name =
+        msg.name || msg.tool || msg.data?.name || msg.data?.tool || "tool";
+      const input =
+        msg.input ??
+        msg.args ??
+        msg.arguments ??
+        msg.data?.input ??
+        msg.data?.arguments ??
+        msg.data?.args;
+      pushTool({
+        name,
+        kind: "call",
+        detail: formatToolPayload(input),
+      });
+      paint("running");
+    } else if (msg.type === "tool_result" || msg.type === "tool_response") {
+      const name = msg.name || msg.tool || msg.data?.name || "result";
+      const result =
+        msg.result ?? msg.output ?? msg.data?.result ?? msg.data ?? msg.content;
+      pushTool({
+        name,
+        kind: "result",
+        detail: formatToolPayload(result, 320),
+      });
+      paint("running");
+    } else if (msg.type === "studio" && msg.event === "stderr" && msg.data) {
+      const line = String(msg.data).trim();
+      if (line) {
+        pushTool({
+          name: "stderr",
+          kind: "stderr",
+          detail: formatToolPayload(line, 200),
+        });
+        paint("running");
+      }
+    } else if (msg.type === "studio" && msg.event === "raw" && msg.data) {
+      pushTool({
+        name: "raw",
+        kind: "call",
+        detail: formatToolPayload(msg.data, 160),
+      });
       paint("running");
     } else if (msg.type === "error") {
-      textAcc += `\n\n[error] ${msg.message || JSON.stringify(msg)}`;
+      const errMsg = msg.message || JSON.stringify(msg);
+      textAcc += `\n\n[error] ${errMsg}`;
+      pushTool({ name: "error", kind: "error", detail: formatToolPayload(errMsg) });
       paint("failed");
     } else if (msg.type === "studio" && msg.event === "finished") {
       finished = true;
       const status =
         msg.status || (msg.exitCode === 0 ? "completed" : "failed");
-      getSessionAndRender(status);
+      // Prefer full session text; if reattached mid-stream, keep accumulated
+      getSessionAndRender(status).then(() => {
+        // If server final text is empty but we streamed, keep stream text visible
+        if (assistantMsgId && textAcc) {
+          const root = $("#transcript .transcript-inner");
+          const el = root?.querySelector(`[data-msg-id="${assistantMsgId}"]`);
+          const prose = el?.querySelector(".prose");
+          if (prose && !prose.textContent?.trim()) {
+            paint(status);
+          }
+        }
+      });
       setRunning(false);
       setRunBadge(status);
       closeStream();

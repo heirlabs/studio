@@ -156,12 +156,14 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.ok(!list2.body.images.some((i) => i.name === name));
   });
 
-  it("rejects non-image upload", async () => {
+  it("rejects non-attachment binary upload", async () => {
     const fd = new FormData();
     fd.append(
       "files",
-      new Blob(["not an image"], { type: "text/plain" }),
-      "notes.txt",
+      new Blob([new Uint8Array([0, 1, 2, 3])], {
+        type: "application/octet-stream",
+      }),
+      "payload.exe",
     );
     const up = await fetch(`${ctx.base}/api/upload`, {
       method: "POST",
@@ -169,7 +171,7 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     });
     assert.equal(up.status, 400);
     const body = await up.json();
-    assert.match(body.error, /image/i);
+    assert.match(body.error, /image|text|code|attachment/i);
   });
 
   it("POST /api/runs rejects unknown workflow", async () => {
@@ -852,5 +854,113 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.equal(res.status, 200);
     assert.equal(body.ruleId, "quick");
     assert.equal(body.reasoningEffort, "low");
+  });
+
+  it("accepts text file upload attachment", async () => {
+    const form = new FormData();
+    form.append(
+      "files",
+      new Blob(["export const x = 1;\n"], { type: "text/javascript" }),
+      "helper.js",
+    );
+    const res = await fetch(`${ctx.base}/api/upload`, {
+      method: "POST",
+      body: form,
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(body.files?.length >= 1);
+    assert.equal(body.files[0].kind, "file");
+    const list = await json(ctx.base, "/api/uploads");
+    assert.ok(
+      (list.body.files || list.body.images).some((f) =>
+        f.name.includes("helper"),
+      ),
+    );
+  });
+
+  it("session message sets activeRunId then clears on finish", async () => {
+    process.env.FAKE_GROK_MODE = "pong";
+    const session = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT }),
+    });
+    const sid = session.body.id;
+    const msg = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "active run track", cwd: ROOT }),
+    });
+    assert.equal(msg.res.status, 201);
+    assert.ok(msg.body.run.id);
+    const mid = await json(ctx.base, `/api/sessions/${sid}`);
+    // may still be running or already finished depending on timing
+    if (mid.body.activeRunId) {
+      assert.equal(mid.body.activeRunId, msg.body.run.id);
+    }
+    await waitForRun(ctx.base, msg.body.run.id);
+    await new Promise((r) => setTimeout(r, 80));
+    const done = await json(ctx.base, `/api/sessions/${sid}`);
+    assert.equal(done.body.activeRunId, null);
+    const active = await json(ctx.base, `/api/sessions/${sid}/active-run`);
+    assert.equal(active.body.active, false);
+  });
+
+  it("active-run reports live slow run for reattach", async () => {
+    process.env.FAKE_GROK_MODE = "slow";
+    process.env.FAKE_GROK_SLEEP_MS = "2500";
+    const session = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT }),
+    });
+    const sid = session.body.id;
+    const msg = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "slow for reattach", cwd: ROOT }),
+    });
+    assert.equal(msg.res.status, 201);
+    const active = await json(ctx.base, `/api/sessions/${sid}/active-run`);
+    assert.equal(active.body.active, true);
+    assert.equal(active.body.live, true);
+    assert.equal(active.body.runId, msg.body.run.id);
+    assert.ok(active.body.messageId);
+    // cancel to not leak
+    await json(ctx.base, `/api/runs/${msg.body.run.id}/cancel`, {
+      method: "POST",
+    });
+    process.env.FAKE_GROK_SLEEP_MS = "0";
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("reconcile endpoint is reachable", async () => {
+    const { res, body } = await json(ctx.base, "/api/runs/reconcile", {
+      method: "POST",
+    });
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(body.reconciled));
+  });
+
+  it("tools mode run completes with tool events in log", async () => {
+    process.env.FAKE_GROK_MODE = "tools";
+    const { res, body } = await json(ctx.base, "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "code-agent",
+        prompt: "use tools",
+        cwd: ROOT,
+      }),
+    });
+    assert.equal(res.status, 201);
+    const done = await waitForRun(ctx.base, body.id);
+    assert.equal(done.meta.status, "completed");
+    const detail = await json(ctx.base, `/api/runs/${body.id}`);
+    const types = detail.body.events.map((e) => e.type);
+    assert.ok(types.includes("tool_call"));
+    assert.ok(types.includes("tool_result"));
+    process.env.FAKE_GROK_MODE = "pong";
   });
 });

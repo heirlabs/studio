@@ -47,7 +47,9 @@ import {
   providerToEnv,
   describeProvider,
 } from "../../server/lib/providers.js";
-import { buildGrokArgs } from "../../server/lib/runs.js";
+import { buildGrokArgs, createRunManager } from "../../server/lib/runs.js";
+import { createLogger } from "../../server/lib/logger.js";
+import { createConfig } from "../../server/lib/config.js";
 import { randomUUID } from "crypto";
 
 describe("budget", () => {
@@ -398,5 +400,57 @@ describe("buildGrokArgs", () => {
     });
     assert.ok(args.includes("bypassPermissions"));
     assert.ok(args.includes("--always-approve"));
+  });
+});
+
+describe("run reconcile", () => {
+  it("marks orphaned running metas as aborted", () => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), "gs-rec-"));
+    const runsDir = path.join(data, "runs");
+    const id = randomUUID();
+    const runDir = path.join(runsDir, id);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir, "meta.json"),
+      JSON.stringify({
+        id,
+        status: "running",
+        startedAt: Date.now() - 60_000,
+        exitCode: null,
+      }),
+    );
+    const cfg = createConfig({
+      data,
+      root: data,
+      grokBin: process.execPath,
+      maxConcurrentRuns: 3,
+    });
+    // Override runs path to our temp
+    cfg.runs = runsDir;
+    cfg.uploads = path.join(data, "uploads");
+    cfg.outputs = path.join(data, "outputs");
+    fs.mkdirSync(cfg.uploads, { recursive: true });
+    fs.mkdirSync(cfg.outputs, { recursive: true });
+
+    const mgr = createRunManager(cfg, createLogger("test"));
+    // createRunManager already reconciles once; write another stale and reconcile again
+    const id2 = randomUUID();
+    const runDir2 = path.join(runsDir, id2);
+    fs.mkdirSync(runDir2, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir2, "meta.json"),
+      JSON.stringify({
+        id: id2,
+        status: "running",
+        startedAt: Date.now() - 10_000,
+      }),
+    );
+    const { reconciled } = mgr.reconcileStaleRuns();
+    assert.ok(reconciled.some((r) => r.id === id2));
+    const meta = JSON.parse(
+      fs.readFileSync(path.join(runDir2, "meta.json"), "utf8"),
+    );
+    assert.equal(meta.status, "aborted");
+    fs.rmSync(data, { recursive: true, force: true });
   });
 });

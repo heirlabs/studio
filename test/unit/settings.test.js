@@ -69,4 +69,21 @@ describe("settings layers", () => {
       /scope/,
     );
   });
+
+  it("clears maxBudgetUsd when set to null", () => {
+    saveSettings(
+      "local",
+      { maxBudgetUsd: 0.001 },
+      { dataDir: data, projectCwd: project, home },
+    );
+    let loaded = loadSettings({ dataDir: data, projectCwd: project, home });
+    assert.equal(loaded.settings.maxBudgetUsd, 0.001);
+    saveSettings(
+      "local",
+      { maxBudgetUsd: null },
+      { dataDir: data, projectCwd: project, home },
+    );
+    loaded = loadSettings({ dataDir: data, projectCwd: project, home });
+    assert.equal(loaded.settings.maxBudgetUsd, null);
+  });
 });

@@ -17,6 +17,8 @@ import {
   searchMessageHistory,
   listRecentUserPrompts,
   restoreSessionFromCheckpoint,
+  setSessionActiveRun,
+  findRunningAssistant,
 } from "../../server/lib/sessions.js";
 
 describe("chat sessions", () => {
@@ -136,5 +138,22 @@ describe("chat sessions", () => {
     assert.ok(
       restored.messages.filter((m) => m.role === "user").every((m) => m.text === "before restore"),
     );
+  });
+
+  it("tracks activeRunId and finds running assistant", () => {
+    const s = createSession(data, { cwd: "/tmp/proj" });
+    const runId = "33333333-3333-4333-8333-333333333333";
+    appendUserMessage(data, s.id, { text: "go" });
+    const { message } = appendAssistantPlaceholder(data, s.id, { runId });
+    setSessionActiveRun(data, s.id, runId);
+    const got = getSession(data, s.id);
+    assert.equal(got.activeRunId, runId);
+    const running = findRunningAssistant(got);
+    assert.equal(running.id, message.id);
+    assert.equal(running.runId, runId);
+    setSessionActiveRun(data, s.id, null);
+    assert.equal(getSession(data, s.id).activeRunId, null);
+    const list = listSessions(data);
+    assert.ok(list.sessions.some((x) => x.id === s.id));
   });
 });

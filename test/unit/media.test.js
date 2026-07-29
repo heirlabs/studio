@@ -8,9 +8,14 @@ import {
   harvestFromText,
   harvestFromSession,
   listMediaInDir,
+  listAttachmentsInDir,
   copyMedia,
   isImageFile,
   isMediaFile,
+  isTextAttachFile,
+  isAttachmentFile,
+  isAttachmentUpload,
+  mediaKind,
 } from "../../server/lib/media.js";
 
 const TINY_PNG = Buffer.from(
@@ -31,6 +36,35 @@ describe("media helpers", () => {
     assert.equal(isImageFile("a.PNG"), true);
     assert.equal(isMediaFile("a.mp4"), true);
     assert.equal(isImageFile("a.txt"), false);
+    assert.equal(isTextAttachFile("src/app.ts"), true);
+    assert.equal(isTextAttachFile("Dockerfile"), true);
+    assert.equal(isAttachmentFile("notes.md"), true);
+    assert.equal(isAttachmentFile("virus.exe"), false);
+    assert.equal(mediaKind("x.py"), "file");
+    assert.equal(mediaKind("x.png"), "image");
+    assert.ok(
+      isAttachmentUpload({ mimetype: "text/plain", originalname: "a.txt" }),
+    );
+    assert.ok(
+      isAttachmentUpload({ mimetype: "image/png", originalname: "a.png" }),
+    );
+    assert.equal(
+      isAttachmentUpload({
+        mimetype: "application/octet-stream",
+        originalname: "bad.bin",
+      }),
+      false,
+    );
+  });
+
+  it("lists text attachments alongside images", () => {
+    const dir = path.join(tmp, "atts");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "a.png"), TINY_PNG);
+    fs.writeFileSync(path.join(dir, "note.md"), "# hi\n");
+    const list = listAttachmentsInDir(dir, tmp);
+    assert.ok(list.some((f) => f.name === "a.png" && f.kind === "image"));
+    assert.ok(list.some((f) => f.name === "note.md" && f.kind === "file"));
   });
 
   it("encodeSessionCwd matches encodeURIComponent(resolve)", () => {

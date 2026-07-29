@@ -87,6 +87,27 @@ async function main() {
     return;
   }
 
+  if (mode === "tools") {
+    emit({ type: "thought", data: "planning tools" });
+    emit({
+      type: "tool_call",
+      name: "read_file",
+      input: { target_file: "src/app.js", limit: 50 },
+    });
+    emit({
+      type: "tool_result",
+      name: "read_file",
+      result: "export function app() { return 1; }",
+    });
+    emit({ type: "text", data: "Used tools. PONG" });
+    emit({
+      type: "end",
+      stopReason: "EndTurn",
+      sessionId: "00000000-0000-4000-8000-000000000077",
+    });
+    return;
+  }
+
   // default pong
   emit({ type: "thought", data: "." });
   emit({ type: "text", data: "PONG" });

@@ -22,6 +22,10 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Checkpoints | Pre-run + manual snapshots; restore messages |
 | Providers | Gateway / API base URL → env for child `grok` |
 | Settings scopes | user (`~/.grok-studio/settings.json`) · project (`.grok-studio/settings.json`) · local (`data/settings.local.json`) |
+| Run reattach | Switch sessions mid-run; EventSource re-subscribes via `activeRunId` |
+| Tool stream UI | Live tool_call / tool_result / stderr cards with payload previews |
+| File attachments | Images **and** text/code files (`@path` into the prompt) |
+| Stuck-run recovery | Startup + `POST /api/runs/reconcile` marks orphaned `running` metas aborted |
 
 **Binds only to `127.0.0.1`.** Non-loopback clients get `403`.
 

@@ -116,9 +116,14 @@ export function validateSettingsPatch(patch) {
   }
   if (patch.extendedThinking != null)
     out.extendedThinking = Boolean(patch.extendedThinking);
-  if (patch.maxTurns != null) {
-    if (patch.maxTurns === "" || patch.maxTurns === false) out.maxTurns = null;
-    else {
+  if (patch.maxTurns !== undefined) {
+    if (
+      patch.maxTurns === null ||
+      patch.maxTurns === "" ||
+      patch.maxTurns === false
+    ) {
+      out.maxTurns = null;
+    } else {
       const n = Number(patch.maxTurns);
       if (!Number.isInteger(n) || n < 1 || n > 500) {
         const err = new Error("maxTurns must be an integer 1–500");
@@ -128,10 +133,14 @@ export function validateSettingsPatch(patch) {
       out.maxTurns = n;
     }
   }
-  if (patch.maxBudgetUsd != null) {
-    if (patch.maxBudgetUsd === "" || patch.maxBudgetUsd === false)
+  if (patch.maxBudgetUsd !== undefined) {
+    if (
+      patch.maxBudgetUsd === null ||
+      patch.maxBudgetUsd === "" ||
+      patch.maxBudgetUsd === false
+    ) {
       out.maxBudgetUsd = null;
-    else {
+    } else {
       const n = Number(patch.maxBudgetUsd);
       if (!Number.isFinite(n) || n < 0) {
         const err = new Error("maxBudgetUsd must be a non-negative number");

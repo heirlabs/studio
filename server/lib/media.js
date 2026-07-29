@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import { MEDIA_EXT, IMAGE_EXT } from "./config.js";
+import { MEDIA_EXT, IMAGE_EXT, TEXT_ATTACH_EXT } from "./config.js";
 import { safeName } from "./template.js";
 
 export function isMediaFile(name) {
@@ -12,8 +12,33 @@ export function isImageFile(name) {
   return IMAGE_EXT.has(path.extname(name).toLowerCase());
 }
 
+export function isTextAttachFile(name) {
+  const base = path.basename(name || "");
+  const lower = base.toLowerCase();
+  // extensionless common names
+  if (
+    lower === "dockerfile" ||
+    lower === "makefile" ||
+    lower === "gemfile" ||
+    lower === "procfile" ||
+    lower === "license" ||
+    lower === "readme"
+  ) {
+    return true;
+  }
+  return TEXT_ATTACH_EXT.has(path.extname(lower));
+}
+
+/** Image, video, or text/code attachment allowed in uploads */
+export function isAttachmentFile(name) {
+  return isMediaFile(name) || isTextAttachFile(name);
+}
+
 export function mediaKind(name) {
-  return /\.(mp4|webm|mov)$/i.test(name) ? "video" : "image";
+  if (/\.(mp4|webm|mov)$/i.test(name)) return "video";
+  if (isImageFile(name)) return "image";
+  if (isTextAttachFile(name)) return "file";
+  return "file";
 }
 
 export function listMediaInDir(dir, dataRoot) {
@@ -21,6 +46,32 @@ export function listMediaInDir(dir, dataRoot) {
   return fs
     .readdirSync(dir)
     .filter((f) => isMediaFile(f) && !f.startsWith("."))
+    .map((f) => {
+      const full = path.join(dir, f);
+      const st = fs.statSync(full);
+      if (!st.isFile()) return null;
+      const rel = path.relative(dataRoot, full).split(path.sep).join("/");
+      return {
+        name: f,
+        path: full,
+        url: `/files/${rel}`,
+        size: st.size,
+        mtime: st.mtimeMs,
+        kind: mediaKind(f),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+}
+
+/**
+ * List all attachable uploads (images + text/code) in a directory.
+ */
+export function listAttachmentsInDir(dir, dataRoot) {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => isAttachmentFile(f) && !f.startsWith("."))
     .map((f) => {
       const full = path.join(dir, f);
       const st = fs.statSync(full);
@@ -155,4 +206,28 @@ export function isImageUpload(file) {
   return (
     /^image\//.test(file.mimetype || "") || isImageFile(file.originalname || "")
   );
+}
+
+/**
+ * Accept images and text/code attachments for coding runs.
+ */
+export function isAttachmentUpload(file) {
+  if (!file) return false;
+  if (isImageUpload(file)) return true;
+  if (isTextAttachFile(file.originalname || "")) return true;
+  const mime = String(file.mimetype || "").toLowerCase();
+  if (
+    mime.startsWith("text/") ||
+    mime === "application/json" ||
+    mime === "application/javascript" ||
+    mime === "application/typescript" ||
+    mime === "application/xml" ||
+    mime === "application/x-yaml" ||
+    mime === "application/yaml" ||
+    mime === "application/x-sh" ||
+    mime === "application/x-python"
+  ) {
+    return true;
+  }
+  return false;
 }

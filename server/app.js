@@ -5,7 +5,11 @@ import fs from "fs";
 import { execFileSync } from "child_process";
 import { createConfig, isLoopback, isUuid } from "./lib/config.js";
 import { loadCatalog, listRhaiWorkflows } from "./lib/catalog.js";
-import { listMediaInDir, isImageUpload } from "./lib/media.js";
+import {
+  listMediaInDir,
+  listAttachmentsInDir,
+  isAttachmentUpload,
+} from "./lib/media.js";
 import { safeName } from "./lib/template.js";
 import { createRunManager } from "./lib/runs.js";
 import { getProject, setProject } from "./lib/projects.js";
@@ -24,6 +28,8 @@ import {
   restoreSessionFromCheckpoint,
   searchMessageHistory,
   listRecentUserPrompts,
+  setSessionActiveRun,
+  findRunningAssistant,
 } from "./lib/sessions.js";
 import { createLogger } from "./lib/logger.js";
 import {
@@ -110,8 +116,13 @@ export function createApp(overrides = {}) {
       files: cfg.maxUploadFiles,
     },
     fileFilter: (_req, file, cb) => {
-      if (isImageUpload(file)) cb(null, true);
-      else cb(new Error("Only image files are accepted"));
+      if (isAttachmentUpload(file)) cb(null, true);
+      else
+        cb(
+          new Error(
+            "Only images and text/code files are accepted as attachments",
+          ),
+        );
     },
   });
 
@@ -415,10 +426,12 @@ export function createApp(overrides = {}) {
             outputs: finishedMeta.outputs || [],
             grokSessionId: finishedMeta.sessionId,
           });
+          setSessionActiveRun(cfg.data, sessionId, null);
         },
       });
 
       attachRunToAssistantMessage(cfg.data, sessionId, assistantMsgId, id);
+      setSessionActiveRun(cfg.data, sessionId, id);
 
       const updated = getSession(cfg.data, sessionId);
       const assistantMessage =
@@ -443,13 +456,50 @@ export function createApp(overrides = {}) {
         text: e.message || "Run failed to start",
         status: "error",
       });
+      setSessionActiveRun(cfg.data, sessionId, null);
       log.warn("session.message.reject", { status, message: e.message });
       res.status(status).json({ error: e.message });
     }
   });
 
+  /**
+   * Reattach helper: is this session's run still live?
+   */
+  app.get("/api/sessions/:id/active-run", (req, res) => {
+    if (!isUuid(req.params.id)) {
+      res.status(400).json({ error: "invalid session id" });
+      return;
+    }
+    const session = getSession(cfg.data, req.params.id);
+    if (!session) {
+      res.status(404).json({ error: "not found" });
+      return;
+    }
+    const liveMeta = runs.getActiveRunForSession(req.params.id);
+    const runningMsg = findRunningAssistant(session);
+    const runId =
+      liveMeta?.id || session.activeRunId || runningMsg?.runId || null;
+    if (!runId) {
+      res.json({ active: false, runId: null, messageId: null });
+      return;
+    }
+    const live = runs.isLive(runId);
+    const detail = runs.getRun(runId);
+    res.json({
+      active: live,
+      runId,
+      messageId: runningMsg?.id || null,
+      meta: detail?.meta || liveMeta || null,
+      live,
+    });
+  });
+
   app.get("/api/uploads", (_req, res) => {
-    res.json({ images: listMediaInDir(cfg.uploads, cfg.data) });
+    const files = listAttachmentsInDir(cfg.uploads, cfg.data);
+    res.json({
+      images: files, // legacy key — includes images + text/code
+      files,
+    });
   });
 
   app.get("/api/outputs", (_req, res) => {
@@ -463,14 +513,19 @@ export function createApp(overrides = {}) {
         res.status(400).json({ error: err.message });
         return;
       }
-      const files = (req.files || []).map((f) => ({
-        name: f.filename,
-        originalName: f.originalname,
-        path: f.path,
-        url: `/files/uploads/${f.filename}`,
-        size: f.size,
-        kind: "image",
-      }));
+      const files = (req.files || []).map((f) => {
+        const ext = path.extname(f.filename || f.originalname || "").toLowerCase();
+        const isImg = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|avif)$/i.test(ext);
+        const isVid = /\.(mp4|webm|mov)$/i.test(ext);
+        return {
+          name: f.filename,
+          originalName: f.originalname,
+          path: f.path,
+          url: `/files/uploads/${f.filename}`,
+          size: f.size,
+          kind: isVid ? "video" : isImg ? "image" : "file",
+        };
+      });
       log.info("upload.ok", { count: files.length });
       res.json({ ok: true, files });
     });
@@ -571,6 +626,12 @@ export function createApp(overrides = {}) {
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message });
     }
+  });
+
+  app.post("/api/runs/reconcile", (_req, res) => {
+    const result = runs.reconcileStaleRuns();
+    log.info("runs.reconcile", { count: result.reconciled.length });
+    res.json(result);
   });
 
   // ── Settings (user / project / local) ─────────────────────────────

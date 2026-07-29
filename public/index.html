@@ -121,8 +121,8 @@
                 placeholder="Describe the coding task… (Enter to send, Shift+Enter for newline)"
               ></textarea>
               <div class="composer-actions">
-                <button type="button" class="ghost" id="btn-attach" title="Attach images">＋</button>
-                <input type="file" id="file-input" accept="image/*" multiple hidden />
+                <button type="button" class="ghost" id="btn-attach" title="Attach images or code files">＋</button>
+                <input type="file" id="file-input" accept="image/*,.txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.go,.rs,.rb,.java,.swift,.c,.h,.cpp,.css,.html,.yml,.yaml,.toml,.sh,.sql,.log,.diff,.patch" multiple hidden />
                 <button type="button" class="primary" id="btn-run" title="Send">
                   Run
                 </button>
@@ -149,7 +149,7 @@
     </div>
 
     <!-- Hidden drop target for whole-window drops -->
-    <div id="drop-overlay" class="drop-overlay hidden">Drop images to attach</div>
+    <div id="drop-overlay" class="drop-overlay hidden">Drop images or code files to attach</div>
 
     <div id="toast" class="toast hidden" role="status"></div>
 

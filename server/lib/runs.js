@@ -285,8 +285,55 @@ export function createRunManager(cfg, log) {
       meta,
       events,
       outputs: listMediaInDir(path.join(dir, "outputs"), cfg.data),
+      live: active.has(id) && active.get(id).status === "running",
     };
   }
+
+  /**
+   * Mark on-disk runs stuck as "running" without a live process as aborted.
+   * Called on manager start and via API for crash recovery.
+   */
+  function reconcileStaleRuns({ maxAgeMs = 0 } = {}) {
+    if (!fs.existsSync(cfg.runs)) return { reconciled: [] };
+    const reconciled = [];
+    const now = Date.now();
+    for (const id of fs.readdirSync(cfg.runs)) {
+      if (!isUuid(id)) continue;
+      if (active.has(id)) continue;
+      const metaPath = path.join(cfg.runs, id, "meta.json");
+      if (!fs.existsSync(metaPath)) continue;
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      if (meta.status !== "running") continue;
+      if (maxAgeMs > 0 && meta.startedAt && now - meta.startedAt < maxAgeMs) {
+        continue;
+      }
+      meta.status = "aborted";
+      meta.error = meta.error || "Process lost (server restart or crash)";
+      meta.finishedAt = now;
+      meta.exitCode = meta.exitCode ?? -1;
+      writeMeta(path.join(cfg.runs, id), meta);
+      reconciled.push({ id, previousStatus: "running", status: "aborted" });
+      log.warn("run.reconcile", { id, reason: "stale_running" });
+    }
+    return { reconciled };
+  }
+
+  function isLive(id) {
+    const s = active.get(id);
+    return Boolean(s && s.status === "running" && s.proc);
+  }
+
+  function getActiveRunForSession(chatSessionId) {
+    if (!chatSessionId) return null;
+    for (const s of active.values()) {
+      if (s.status !== "running") continue;
+      if (s.meta?.chatSessionId === chatSessionId) return s.meta;
+    }
+    return null;
+  }
+
+  // Recover stuck metas from prior process crashes
+  reconcileStaleRuns();
 
   function startRun({
     wf,
@@ -832,5 +879,8 @@ export function createRunManager(cfg, log) {
     startRun,
     attachStream,
     cancel,
+    reconcileStaleRuns,
+    isLive,
+    getActiveRunForSession,
   };
 }

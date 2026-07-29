@@ -2,6 +2,10 @@ node_modules/
 data/uploads/*
 data/outputs/*
 data/runs/*
+data/chat-sessions/
+data/checkpoints/
+data/*.json
+data/*.jsonl
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
 !data/runs/.gitkeep

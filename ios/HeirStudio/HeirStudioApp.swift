@@ -12,7 +12,6 @@ struct HeirStudioApp: App {
             RootView()
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
-                .task { await model.restore() }
                 .onOpenURL { model.acceptPairingLink($0) }
         }
     }
@@ -74,6 +73,13 @@ struct RootView: View {
             } else {
                 PairingView()
             }
+        }
+        .task {
+            // Ask while the first screen is visible. 1.0.4 waited until
+            // after a pairing/health round-trip, so the system sheet never
+            // appeared and the Mac never received a device token.
+            await PushService.shared.requestAuthorizationAndRegister()
+            await model.restore()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

@@ -18,6 +18,10 @@ final class ChatModel: ObservableObject {
     @Published var reconnecting = false
     @Published var toolCount = 0
     @Published var lastToolLabel: String?
+    @Published var followTail = true
+    @Published var queuedText: String?
+    @Published var context: SessionContext?
+    @Published var compacting = false
 
     private let client: StudioClient
     let sessionId: String
@@ -26,6 +30,7 @@ final class ChatModel: ObservableObject {
     private var textAccumulator = ""
     private var thoughtAccumulator = ""
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var lastSeq = 0
 
     init(client: StudioClient, sessionId: String) {
         self.client = client
@@ -38,6 +43,7 @@ final class ChatModel: ObservableObject {
             messages = detail.messages
             title = detail.title ?? "New chat"
             cwd = detail.cwd
+            context = detail.context
             await reattachIfRunning()
         } catch {
             onError(error)
@@ -69,9 +75,12 @@ final class ChatModel: ObservableObject {
     private func attach(runId: String, messageId: String?) async {
         streamingMessageId =
             messageId ?? messages.last(where: { $0.role == "assistant" })?.id
-        textAccumulator = messages.first(where: { $0.id == streamingMessageId })?.text ?? ""
-        thoughtAccumulator =
-            messages.first(where: { $0.id == streamingMessageId })?.thoughts ?? ""
+        if lastSeq == 0 {
+            // Replay from seq 1 is the source of truth. Seeding from the
+            // session snapshot then replaying every token duplicated answers.
+            textAccumulator = ""
+            thoughtAccumulator = ""
+        }
         isRunning = true
         runStatus = "running"
         reconnecting = false
@@ -79,10 +88,11 @@ final class ChatModel: ObservableObject {
     }
 
     var canSend: Bool {
-        !isRunning
-            && (!composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || !pendingImages.isEmpty
-                || !pendingMacFiles.isEmpty)
+        let hasBody = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !pendingImages.isEmpty
+            || !pendingMacFiles.isEmpty
+        if isRunning { return hasBody }
+        return hasBody
     }
 
     func attachMacFile(_ path: String) {
@@ -111,6 +121,11 @@ final class ChatModel: ObservableObject {
     func send() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
+        if isRunning {
+            queuedText = text.isEmpty ? nil : text
+            composerText = ""
+            return
+        }
         let toUpload = pendingImages
         let macFiles = pendingMacFiles
         composerText = ""
@@ -119,6 +134,7 @@ final class ChatModel: ObservableObject {
         isRunning = true
         runStatus = "running"
         reconnecting = false
+        lastSeq = 0
         tools.removeAll()
         toolCount = 0
         lastToolLabel = nil
@@ -164,8 +180,55 @@ final class ChatModel: ObservableObject {
     }
 
     func cancel() async {
-        guard let runId = currentRunId else { return }
+        guard let runId = currentRunId else {
+            isRunning = false
+            runStatus = "cancelled"
+            return
+        }
         do { try await client.cancel(runId: runId) } catch { onError(error) }
+        for _ in 0..<6 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if let active = try? await client.activeRun(sessionId: sessionId), !active.active {
+                break
+            }
+        }
+        if isRunning {
+            isRunning = false
+            runStatus = "cancelled"
+            currentRunId = nil
+            reconnecting = false
+        }
+    }
+
+    func applyRestored(_ detail: SessionDetail) {
+        messages = detail.messages
+        title = detail.title ?? title
+        cwd = detail.cwd ?? cwd
+        context = detail.context ?? context
+        isRunning = false
+        currentRunId = nil
+        lastSeq = 0
+        note("Restored a checkpoint. Files on disk were not reverted.")
+    }
+
+    func compact(keep: String? = nil) async {
+        guard !isRunning else {
+            note("Finish or stop the current turn before compacting.")
+            return
+        }
+        compacting = true
+        defer { compacting = false }
+        do {
+            let result = try await client.compactSession(sessionId, note: keep)
+            context = result.context
+            if let summary = result.summary, !summary.isEmpty {
+                note("Compacted to \(result.context?.percent.map(String.init) ?? "?")% — \(summary)")
+            } else if let percent = result.context?.percent {
+                note("Context compacted to \(percent)%.")
+            }
+        } catch {
+            onError(error)
+        }
     }
 
     private var currentRunId: String?
@@ -176,7 +239,7 @@ final class ChatModel: ObservableObject {
         streamTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = try await self.client.streamEvents(runId: runId)
+                let stream = try await self.client.streamEvents(runId: runId, after: self.lastSeq)
                 for try await event in stream {
                     if Task.isCancelled { return }
                     await self.handle(event, runId: runId)
@@ -201,8 +264,8 @@ final class ChatModel: ObservableObject {
     func recoverAfterDrop(error: Error? = nil) async {
         guard isRunning || currentRunId != nil else { return }
         reconnecting = true
-        for attempt in 0..<8 {
-            try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+        for attempt in 0..<24 {
+            try? await Task.sleep(nanoseconds: UInt64(min(4, attempt + 1)) * 400_000_000)
             if Task.isCancelled { return }
             if let active = try? await client.activeRun(sessionId: sessionId),
                 active.active, let runId = active.runId
@@ -261,6 +324,7 @@ final class ChatModel: ObservableObject {
     }
 
     private func handle(_ event: StreamEvent, runId: String) {
+        if let seq = event.seq, seq > lastSeq { lastSeq = seq }
         switch (event.type, event.event) {
         case ("text", _):
             textAccumulator += event.data ?? ""
@@ -296,6 +360,22 @@ final class ChatModel: ObservableObject {
             append(
                 ToolActivity(
                     name: "budget", kind: .error, detail: event.message ?? "budget exceeded"))
+
+        case ("studio", "compact"):
+            let before = event.tokensBefore.map(String.init) ?? "?"
+            let after = event.tokensAfter.map(String.init) ?? "?"
+            append(
+                ToolActivity(
+                    name: "compact",
+                    kind: .note,
+                    detail: "\(event.trigger ?? "auto") \(before) → \(after)"))
+
+        case ("studio", "session_resume_failed"):
+            append(
+                ToolActivity(
+                    name: "resume",
+                    kind: .error,
+                    detail: event.message ?? "Could not resume the Grok session"))
 
         case ("studio", "stderr"):
             let line = (event.data ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -346,9 +426,18 @@ final class ChatModel: ObservableObject {
         currentRunId = nil
         // A dismissed prompt for a finished run would answer nothing.
         pendingPermission = nil
+        lastSeq = 0
         streamTask?.cancel()
         streamTask = nil
-        Task { await reloadAfterFinish(status: status) }
+        let queued = queuedText
+        queuedText = nil
+        Task {
+            await reloadAfterFinish(status: status)
+            if let queued, !queued.isEmpty {
+                composerText = queued
+                await send()
+            }
+        }
     }
 
     private func reloadAfterFinish(status: String) async {

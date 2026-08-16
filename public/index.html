@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Grok Studio</title>
+    <title>Heir Studio</title>
     <link rel="stylesheet" href="/styles.css" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✦</text></svg>" />
+    <link rel="icon" href="/mark.svg" type="image/svg+xml" />
   </head>
   <body>
     <div class="drag-strip" aria-hidden="true"></div>
@@ -14,8 +14,10 @@
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-top">
           <div class="sidebar-brand">
-            <span class="mark">✦</span>
-            <span class="sidebar-title">Grok Studio</span>
+            <span class="mark" aria-hidden="true">
+              <img src="/mark.svg" alt="" width="28" height="28" />
+            </span>
+            <span class="sidebar-title">Heir Studio</span>
           </div>
           <div class="sidebar-tabs">
             <button type="button" class="tab active" data-tab="code">Code</button>
@@ -58,6 +60,8 @@
           <div class="chat-header-right">
             <button type="button" class="ghost" id="btn-history" title="History search (Ctrl+R)">⌕</button>
             <button type="button" class="ghost" id="btn-transcript" title="Transcript viewer (Ctrl+O)">☰</button>
+            <button type="button" class="ghost" id="btn-compact" title="Compact Grok context (same as /compact)">compact</button>
+            <span class="badge idle" id="context-badge" title="Context window after last compact">ctx —</span>
             <button type="button" class="ghost" id="btn-checkpoint" title="Create checkpoint">⌘</button>
             <button type="button" class="ghost" id="btn-settings" title="Settings (Ctrl+,)">⚙</button>
             <button type="button" class="ghost native-only hidden" id="btn-open-native">Attach</button>

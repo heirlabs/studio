@@ -27,7 +27,12 @@ struct SessionListView: View {
                                         .foregroundStyle(.green)
                                 }
                             }
-                            if let cwd = session.cwd {
+                            if let preview = session.lastPreview, !preview.isEmpty {
+                                Text(preview)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            } else if let cwd = session.cwd {
                                 Text(shortPath(cwd))
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
@@ -47,6 +52,9 @@ struct SessionListView: View {
                 ChatView(sessionId: session.id, initialTitle: session.displayTitle)
             }
             .navigationDestination(item: $newSession) { session in
+                ChatView(sessionId: session.id, initialTitle: session.displayTitle)
+            }
+            .navigationDestination(item: $model.openedSession) { session in
                 ChatView(sessionId: session.id, initialTitle: session.displayTitle)
             }
             .toolbar {
@@ -83,11 +91,30 @@ struct SessionListView: View {
 
 struct ConnectionSettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var push = PushService.shared
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Alerts") {
+                    LabeledContent("Notifications", value: push.statusText)
+                    if let detail = push.lastError {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                    if push.authorization == .denied {
+                        Button("Open iPhone Settings") {
+                            push.openSystemSettings()
+                        }
+                    } else {
+                        Button("Enable lock-screen alerts") {
+                            Task { await push.requestAuthorizationAndRegister() }
+                        }
+                    }
+                }
+
                 Section("Mac") {
                     LabeledContent("Address", value: model.config?.baseURL.absoluteString ?? "—")
                     LabeledContent("Grok", value: model.health?.grokVersion ?? "—")

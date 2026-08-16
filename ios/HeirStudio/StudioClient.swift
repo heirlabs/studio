@@ -237,6 +237,11 @@ actor StudioClient {
         var workflowId: String = "code-agent"
         var images: [String]?
         var files: [String]?
+        var model: String?
+        var reasoningEffort: String?
+        var maxBudgetUsd: Double?
+        var worktree: Bool?
+        var background: Bool?
     }
 
     struct UploadedFile: Decodable, Sendable {
@@ -325,11 +330,63 @@ actor StudioClient {
     }
 
     /// Live run events. The stream ends when the server closes it.
-    func streamEvents(runId: String) throws -> AsyncThrowingStream<StreamEvent, Error> {
-        let req = try request("/api/runs/\(runId)/stream")
+    func streamEvents(runId: String, after: Int = 0) throws -> AsyncThrowingStream<StreamEvent, Error> {
+        let path = after > 0
+            ? "/api/runs/\(runId)/stream?after=\(after)"
+            : "/api/runs/\(runId)/stream"
+        let req = try request(path)
         return bytesStream(req) { data in
             try? JSONDecoder().decode(StreamEvent.self, from: data)
         }
+    }
+
+    func compactSession(_ id: String, note: String?) async throws -> CompactResult {
+        struct Body: Encodable { let note: String? }
+        return try await send(
+            request("/api/sessions/\(id)/compact", method: "POST", body: Body(note: note)),
+            as: CompactResult.self)
+    }
+
+    func sessionContext(_ id: String) async throws -> ContextResponse {
+        try await send(request("/api/sessions/\(id)/context"), as: ContextResponse.self)
+    }
+
+    func history(query: String, limit: Int = 40) async throws -> [HistoryHit] {
+        let items = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        let list = try await send(
+            request(Self.queryURL(path: "/api/history", items: items)),
+            as: HistoryList.self)
+        return list.hits
+    }
+
+    func listCheckpoints(sessionId: String) async throws -> [CheckpointSummary] {
+        let list = try await send(
+            request("/api/sessions/\(sessionId)/checkpoints"),
+            as: CheckpointList.self)
+        return list.checkpoints
+    }
+
+    func createCheckpoint(sessionId: String, label: String?) async throws -> CheckpointSummary {
+        struct Body: Encodable { let label: String?; let reason: String }
+        return try await send(
+            request(
+                "/api/sessions/\(sessionId)/checkpoints",
+                method: "POST",
+                body: Body(label: label, reason: "manual")),
+            as: CheckpointSummary.self)
+    }
+
+    func restoreCheckpoint(sessionId: String, checkpointId: String) async throws -> SessionDetail {
+        let result = try await send(
+            request(
+                "/api/sessions/\(sessionId)/checkpoints/\(checkpointId)/restore",
+                method: "POST"),
+            as: CheckpointRestore.self)
+        if let session = result.session { return session }
+        return try await session(sessionId)
     }
 
     private func bytesStream<T>(

@@ -30,8 +30,66 @@ struct SessionSummary: Codable, Identifiable, Sendable, Hashable {
     let messageCount: Int?
     let updatedAt: Double?
     let activeRunId: String?
+    let lastPreview: String?
+    let grokSessionId: String?
+    let context: SessionContext?
 
     var displayTitle: String { (title?.isEmpty == false ? title! : nil) ?? "New chat" }
+    var isLive: Bool { activeRunId != nil }
+}
+
+struct SessionContext: Codable, Sendable, Hashable {
+    let used: Int?
+    let total: Int?
+    let percent: Int?
+    let compactedAt: Double?
+    let lastNote: String?
+    let trigger: String?
+    let tokensBefore: Int?
+    let tokensAfter: Int?
+}
+
+struct CompactResult: Codable, Sendable {
+    let ok: Bool?
+    let grokSessionId: String?
+    let context: SessionContext?
+    let summary: String?
+}
+
+struct ContextResponse: Codable, Sendable {
+    let grokSessionId: String?
+    let active: Bool?
+    let context: SessionContext?
+}
+
+struct HistoryHit: Codable, Identifiable, Sendable, Hashable {
+    let sessionId: String
+    let sessionTitle: String?
+    let messageId: String?
+    let text: String
+    let at: Double?
+    let cwd: String?
+    var id: String { "\(sessionId):\(messageId ?? text)" }
+}
+
+struct HistoryList: Codable, Sendable {
+    let hits: [HistoryHit]
+}
+
+struct CheckpointSummary: Codable, Identifiable, Sendable, Hashable {
+    let id: String
+    let label: String?
+    let reason: String?
+    let createdAt: Double?
+}
+
+struct CheckpointList: Codable, Sendable {
+    let checkpoints: [CheckpointSummary]
+}
+
+struct CheckpointRestore: Codable, Sendable {
+    let ok: Bool?
+    let session: SessionDetail?
 }
 
 struct SessionList: Codable, Sendable {
@@ -55,6 +113,10 @@ struct SessionDetail: Codable, Sendable {
     let title: String?
     let cwd: String?
     var messages: [Message]
+    var grokSessionId: String?
+    var context: SessionContext?
+    var lastPreview: String?
+    var activeRunId: String?
 }
 
 struct RunMeta: Codable, Sendable {
@@ -271,6 +333,10 @@ struct StreamEvent: Decodable, Sendable {
     let id: StringOrInt?
     let reason: String?
     let decision: String?
+    let seq: Int?
+    let tokensBefore: Int?
+    let tokensAfter: Int?
+    let trigger: String?
     let toolCall: ToolCall?
     let options: [PermissionOption]?
     let input: AnyCodable?

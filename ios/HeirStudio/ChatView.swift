@@ -14,6 +14,7 @@ struct ChatView: View {
     @State private var showCamera = false
     @State private var showMacPicker = false
     @State private var showGit = false
+    @State private var showCheckpoints = false
 
     init(sessionId: String, initialTitle: String) {
         self.sessionId = sessionId
@@ -31,6 +32,21 @@ struct ChatView: View {
         .navigationTitle(model.title.isEmpty ? initialTitle : model.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Compact context") {
+                        Task { await model.compact() }
+                    }
+                    .disabled(model.isRunning || model.compacting)
+                    Button("Checkpoints") { showCheckpoints = true }
+                    if let percent = model.context?.percent {
+                        Text("Context \(percent)%")
+                    }
+                } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .accessibilityLabel("Context")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 if let cwd = model.cwd, !cwd.isEmpty {
                     Button { showGit = true } label: {
@@ -99,6 +115,11 @@ struct ChatView: View {
         .sheet(isPresented: $showGit) {
             GitSheet(client: appModel.client, cwd: model.cwd ?? "")
         }
+        .sheet(isPresented: $showCheckpoints) {
+            CheckpointSheet(client: appModel.client, sessionId: sessionId) { detail in
+                model.applyRestored(detail)
+            }
+        }
     }
 
     private var transcript: some View {
@@ -106,7 +127,9 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(model.messages) { message in
-                        MessageRow(message: message, thinkingExpanded: model.isRunning)
+                        MessageRow(
+                            message: message,
+                            thinkingExpanded: model.isRunning && message.id == model.messages.last?.id)
                             .id(message.id)
                     }
                     if model.isRunning || model.toolCount > 0 {
@@ -122,6 +145,20 @@ struct ChatView: View {
                 }
                 .padding(16)
             }
+            .overlay(alignment: .bottom) {
+                if !model.followTail, model.isRunning {
+                    Button("Jump to latest") {
+                        model.followTail = true
+                        scrollToEnd(proxy)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 8)
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8).onChanged { value in
+                    if value.translation.height > 12 { model.followTail = false }
+                })
             .onChange(of: model.messages.count) { _, _ in scrollToEnd(proxy) }
             .onChange(of: model.toolCount) { _, _ in scrollToEnd(proxy) }
             .onChange(of: model.messages.last?.thoughts) { _, _ in scrollToEnd(proxy) }
@@ -129,6 +166,7 @@ struct ChatView: View {
     }
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
+        guard model.followTail else { return }
         withAnimation(.easeOut(duration: 0.2)) {
             if !model.tools.isEmpty {
                 proxy.scrollTo("tools", anchor: .bottom)
@@ -187,6 +225,17 @@ struct ChatView: View {
                     }
                 }
             }
+            if let queued = model.queuedText {
+                HStack {
+                    Text("Next: \(queued)")
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Clear") { model.queuedText = nil }
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .images) {
                     Image(systemName: "photo")
@@ -215,7 +264,6 @@ struct ChatView: View {
                     .padding(10)
                     .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 18))
                     .focused($composerFocused)
-                    .disabled(model.isRunning)
 
                 Button {
                     composerFocused = false

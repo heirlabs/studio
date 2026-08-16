@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import UIKit
 import UserNotifications
@@ -14,11 +15,13 @@ enum PushRouting: Sendable {
 /// APNs registration and lock-screen Allow / Deny / Stop routing.
 ///
 /// Categories are installed at launch so a notification can carry actions
-/// before the user has opened a chat. Token upload waits until a pairing
-/// exists; the token itself is never invented (simulator builds simply fail
+/// before the user has opened a chat. The system prompt is requested as soon
+/// as the first view appears — waiting until after a pairing / health check
+/// is why 1.0.4 never asked. Token upload still waits until a pairing exists;
+/// the token itself is never invented (simulator builds fail
 /// `registerForRemoteNotifications` and stay silent).
 @MainActor
-final class PushService {
+final class PushService: ObservableObject {
     static let shared = PushService()
 
     static let permissionCategory = PushRouting.permissionCategory
@@ -30,11 +33,23 @@ final class PushService {
 
     private static let tokenDefaultsKey = "heir.apns.token"
 
-    private(set) var hexToken: String? {
+    @Published private(set) var hexToken: String? {
         didSet { UserDefaults.standard.set(hexToken, forKey: Self.tokenDefaultsKey) }
     }
 
+    @Published private(set) var authorization: UNAuthorizationStatus = .notDetermined
+    @Published private(set) var lastError: String?
+    @Published private(set) var registeredOnMac = false
+
     weak var appModel: AppModel?
+
+    var statusText: String {
+        Self.statusText(
+            authorization: authorization,
+            hexToken: hexToken,
+            registeredOnMac: registeredOnMac,
+            lastError: lastError)
+    }
 
     private init() {
         hexToken = UserDefaults.standard.string(forKey: Self.tokenDefaultsKey)
@@ -42,6 +57,27 @@ final class PushService {
 
     func attach(_ model: AppModel) {
         appModel = model
+    }
+
+    nonisolated static func statusText(
+        authorization: UNAuthorizationStatus,
+        hexToken: String?,
+        registeredOnMac: Bool,
+        lastError: String?
+    ) -> String {
+        switch authorization {
+        case .notDetermined:
+            return "Not asked yet"
+        case .denied:
+            return "Off — enable in iPhone Settings"
+        case .authorized, .provisional, .ephemeral:
+            if let lastError, !lastError.isEmpty { return lastError }
+            if hexToken == nil { return "Waiting for Apple…" }
+            if registeredOnMac { return "On" }
+            return "On this phone — Mac not registered yet"
+        @unknown default:
+            return "Unknown"
+        }
     }
 
     nonisolated static func installCategories() {
@@ -77,31 +113,62 @@ final class PushService {
     }
 
     func requestAuthorizationAndRegister() async {
-        do {
-            let granted = try await UNUserNotificationCenter.current()
-                .requestAuthorization(options: [.alert, .sound, .badge])
-            if granted {
-                UIApplication.shared.registerForRemoteNotifications()
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        authorization = settings.authorizationStatus
+
+        var granted = Self.isGranted(settings.authorizationStatus)
+        if settings.authorizationStatus == .notDetermined {
+            do {
+                granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+            } catch {
+                lastError = error.localizedDescription
+                appModel?.banner = AppModel.Banner(
+                    level: .warning,
+                    text: "Could not ask for notifications: \(error.localizedDescription)")
+                granted = false
             }
-        } catch {
-            // Pairing still works without push.
+            let after = await center.notificationSettings()
+            authorization = after.authorizationStatus
+            granted = Self.isGranted(after.authorizationStatus) || granted
+        }
+
+        if granted {
+            lastError = nil
+            UIApplication.shared.registerForRemoteNotifications()
+        } else if authorization == .denied {
+            lastError = "Notifications are off. Enable them in Settings → Heir Studio."
+            appModel?.banner = AppModel.Banner(level: .warning, text: lastError!)
         }
         await uploadTokenIfPossible()
     }
 
+    func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
     func didRegister(deviceToken: Data) async {
         hexToken = Self.hexToken(from: deviceToken)
+        lastError = nil
         await uploadTokenIfPossible()
     }
 
     func didFailToRegister(_ error: Error) async {
-        // Unsigned / simulator builds never receive a token. Do not stub one.
-        _ = error
+        lastError = error.localizedDescription
+        appModel?.banner = AppModel.Banner(
+            level: .warning,
+            text: "Push registration failed: \(error.localizedDescription)")
+    }
+
+    private static func isGranted(_ status: UNAuthorizationStatus) -> Bool {
+        status == .authorized || status == .provisional || status == .ephemeral
     }
 
     func unregister(using client: StudioClient) async {
         guard let token = hexToken else { return }
         try? await client.unregisterPushToken(token)
+        registeredOnMac = false
     }
 
     func handle(action: String, payload: Payload) async {
@@ -136,12 +203,24 @@ final class PushService {
             appModel?.inboundRun = AppModel.InboundRun(
                 sessionId: sessionId, runId: runId, messageId: nil)
         }
+        appModel?.openSession(id: sessionId)
         Task { await appModel?.refreshSessions() }
     }
 
     private func uploadTokenIfPossible() async {
-        guard let token = hexToken, await AppModel.sharedClient.isConfigured else { return }
-        try? await AppModel.sharedClient.registerPushToken(token)
+        guard let token = hexToken else { return }
+        guard await AppModel.sharedClient.isConfigured else { return }
+        do {
+            try await AppModel.sharedClient.registerPushToken(token)
+            registeredOnMac = true
+            lastError = nil
+        } catch {
+            registeredOnMac = false
+            lastError = error.localizedDescription
+            appModel?.banner = AppModel.Banner(
+                level: .warning,
+                text: "Could not register this iPhone for alerts: \(error.localizedDescription)")
+        }
     }
 
     nonisolated static func hexToken(from data: Data) -> String {

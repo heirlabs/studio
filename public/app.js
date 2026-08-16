@@ -13,6 +13,7 @@ const state = {
   running: false,
   runId: null,
   es: null,
+  hubEs: null,
   streamingMsgId: null,
   permissionMode: "bypassPermissions",
   permissionModes: [],
@@ -26,7 +27,13 @@ const state = {
   modal: null,
   historyHits: [],
   historyIndex: 0,
-  contexts: new Set(["global", "idle", "chat", "composer"]),
+  cliApproval: null,
+  approvalConflict: null,
+  /** Unanswered ACP permission request — dismissing the modal must deny it */
+  pendingPermission: null,
+  /** Shell-style prompt recall for Up/Down in the composer */
+  recall: { list: [], index: -1, draft: "" },
+  hasToolOutput: false,
 };
 
 async function api(path, opts) {
@@ -46,7 +53,7 @@ async function api(path, opts) {
 }
 
 function isNative() {
-  return Boolean(window.grokStudioNative?.isNative);
+  return Boolean(window.heirStudioNative?.isNative);
 }
 
 function escapeHtml(s) {
@@ -65,6 +72,46 @@ function shortPath(p) {
 
 function currentWorkflow() {
   return state.workflows.find((w) => w.id === state.selectedWorkflow);
+}
+
+function paintContextBadge(ctx) {
+  const el = $("#context-badge");
+  if (!el) return;
+  if (ctx && ctx.percent != null) {
+    el.textContent = `ctx ${ctx.percent}%`;
+    el.className = "badge " + (ctx.percent >= 80 ? "busy" : "idle");
+  } else {
+    el.textContent = "ctx —";
+    el.className = "badge idle";
+  }
+}
+
+async function compactActiveSession() {
+  if (!state.activeSessionId) {
+    toast("Open a chat first", "err");
+    return;
+  }
+  if (state.running) {
+    toast("Stop the turn before compacting", "err");
+    return;
+  }
+  const note = window.prompt("Compact context. Optional: what to keep?", "") ?? "";
+  try {
+    const data = await api(`/api/sessions/${state.activeSessionId}/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    });
+    paintContextBadge(data.context);
+    toast(
+      data.context?.percent != null
+        ? `Compacted to ${data.context.percent}%`
+        : "Compacted",
+      "ok",
+    );
+  } catch (e) {
+    toast(e.message, "err");
+  }
 }
 
 function toast(msg, kind = "") {
@@ -166,23 +213,38 @@ function chordFromEvent(e) {
   return normalizeKeyChord([...mods, key].join("+"));
 }
 
+/** Modal kind → its specific keybinding context */
+const MODAL_CONTEXT = {
+  permissionPrompt: "permissionPrompt",
+  history: "historySearch",
+  transcript: "transcriptViewer",
+  settings: "settings",
+  ssh: "sshManager",
+  agents: "agentPicker",
+  checkpoints: "checkpointPicker",
+};
+
+/**
+ * Contexts active right now, **most specific first** — resolveBinding takes the
+ * first match, so this order is the precedence rule (e.g. Escape denies a
+ * permission prompt instead of hitting the global running-mode emergency stop).
+ */
 function activeContexts() {
-  const ctx = new Set(["global"]);
-  if (state.running) ctx.add("running");
-  else ctx.add("idle");
-  ctx.add("chat");
-  if (document.activeElement === $("#prompt")) ctx.add("composer");
-  if (state.modal === "history") ctx.add("historySearch");
-  if (state.modal === "transcript") ctx.add("transcriptViewer");
+  const ctx = [];
   if (state.modal) {
-    ctx.add("modal");
-    if (state.modal === "settings") ctx.add("settings");
-    if (state.modal === "ssh") ctx.add("sshManager");
-    if (state.modal === "agents") ctx.add("agentPicker");
-    if (state.modal === "checkpoints") ctx.add("checkpointPicker");
+    const specific = MODAL_CONTEXT[state.modal];
+    if (specific) ctx.push(specific);
+    ctx.push("modal");
   }
-  if (state.permissionMode === "plan") ctx.add("planMode");
-  return [...ctx];
+  if (document.activeElement === $("#prompt")) ctx.push("composer");
+  if (state.permissionMode === "plan") ctx.push("planMode");
+  if (state.hasToolOutput) ctx.push("toolOutput");
+  if (state.session?.messages?.length) ctx.push("transcript");
+  if (state.sessions.length) ctx.push("sessionList");
+  ctx.push("chat");
+  ctx.push(state.running ? "running" : "idle");
+  ctx.push("global");
+  return ctx;
 }
 
 function resolveBinding(chord) {
@@ -263,6 +325,9 @@ async function refreshHealth() {
   el.classList.toggle("bad", !h.ok);
   text.textContent = h.ok ? h.grokVersion.split(" ")[1] || "ok" : "offline";
   el.title = `${h.grokBin}\nruns ${h.activeRuns}/${h.maxConcurrentRuns}`;
+  state.cliApproval = h.cliApproval || null;
+  state.approvalConflict = h.approvalConflict || null;
+  syncPermUi();
 }
 
 async function loadProject() {
@@ -293,8 +358,8 @@ async function setProject(cwd) {
 }
 
 async function browseProject() {
-  if (isNative() && window.grokStudioNative.openProject) {
-    const p = await window.grokStudioNative.openProject();
+  if (isNative() && window.heirStudioNative.openProject) {
+    const p = await window.heirStudioNative.openProject();
     if (p) await setProject(p);
     return;
   }
@@ -391,9 +456,20 @@ function syncPermUi() {
   const meta = state.permissionModes.find(
     (m) => m.id === state.permissionMode,
   );
-  $("#perm-label").textContent = meta?.short || state.permissionMode;
-  $("#perm-chip").dataset.mode = state.permissionMode;
-  $("#perm-chip").title = `${meta?.label || state.permissionMode}: ${meta?.description || ""} (Shift+Tab)`;
+  const chip = $("#perm-chip");
+  // The CLI's own config can force always-approve, and `grok agent stdio` has
+  // no flag to override it — never show a mode we cannot actually enforce.
+  const overridden = Boolean(
+    state.approvalConflict?.conflict &&
+      state.cliApproval?.forcesAlwaysApprove,
+  );
+  $("#perm-label").textContent =
+    (meta?.short || state.permissionMode) + (overridden ? " ⚠" : "");
+  chip.dataset.mode = state.permissionMode;
+  chip.classList.toggle("perm-overridden", overridden);
+  chip.title = overridden
+    ? state.approvalConflict.message
+    : `${meta?.label || state.permissionMode}: ${meta?.description || ""} (Shift+Tab)`;
   $("#yolo").checked = state.permissionMode === "bypassPermissions";
 }
 
@@ -588,6 +664,7 @@ async function openSession(id) {
     syncModeUi();
   }
   $("#chat-title").textContent = session.title || "New chat";
+  paintContextBadge(session.context);
   renderTranscript(session.messages || []);
   renderSessionList();
   closeStream();
@@ -909,6 +986,48 @@ function closeStream() {
   }
 }
 
+function subscribeHub() {
+  if (state.hubEs) {
+    state.hubEs.close();
+    state.hubEs = null;
+  }
+  const es = new EventSource("/api/events");
+  state.hubEs = es;
+  es.onmessage = (ev) => {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    void onHubEvent(msg);
+  };
+  es.onerror = () => {
+    // EventSource retries on its own; don't tear down the handle.
+  };
+}
+
+async function onHubEvent(msg) {
+  if (!msg || msg.type === "hello") return;
+  if (msg.type === "session") {
+    await refreshSessions();
+    return;
+  }
+  if (msg.type !== "run") return;
+  await refreshSessions();
+  const sid = msg.sessionId;
+  if (!sid || sid !== state.activeSessionId) return;
+
+  if (msg.event === "started" && msg.runId && msg.runId !== state.runId) {
+    // Another client started this turn — attach the live stream.
+    await openSession(sid);
+    return;
+  }
+  if (msg.event === "finished" && !state.running) {
+    await getSessionAndRender(msg.status || "completed");
+  }
+}
+
 async function sendMessage() {
   if (state.running) return;
   const text = $("#prompt").value.trim();
@@ -941,6 +1060,9 @@ async function sendMessage() {
   setRunBadge("running");
   $("#prompt").value = "";
   autoSizePrompt();
+  // this prompt is now the newest history entry; reset recall to the fresh draft
+  state.recall = { list: [], index: -1, draft: "" };
+  state.hasToolOutput = false;
 
   let body;
   try {
@@ -1015,6 +1137,7 @@ function streamRun(runId, assistantMsgId) {
 
   const pushTool = (entry) => {
     tools.push(entry);
+    state.hasToolOutput = true;
     // Cap UI list for long agent turns
     if (tools.length > 80) tools.splice(0, tools.length - 80);
   };
@@ -1032,26 +1155,33 @@ function streamRun(runId, assistantMsgId) {
     } else if (msg.type === "thought" && msg.data) {
       thoughtAcc += msg.data;
       paint("running");
+      // The server normalizes both transports to {name, input} / {name,
+      // result}; the extra fallbacks here cover run logs recorded before that.
     } else if (msg.type === "tool_call" || msg.type === "tool") {
       const name =
-        msg.name || msg.tool || msg.data?.name || msg.data?.tool || "tool";
+        msg.name || msg.title || msg.toolName || msg.tool || "tool";
       const input =
         msg.input ??
+        msg.rawInput ??
         msg.args ??
         msg.arguments ??
         msg.data?.input ??
-        msg.data?.arguments ??
-        msg.data?.args;
+        msg.data?.arguments;
       pushTool({
         name,
         kind: "call",
         detail: formatToolPayload(input),
       });
       paint("running");
-    } else if (msg.type === "tool_result" || msg.type === "tool_response") {
-      const name = msg.name || msg.tool || msg.data?.name || "result";
+    } else if (
+      msg.type === "tool_result" ||
+      msg.type === "tool_call_update" ||
+      msg.type === "tool_response"
+    ) {
+      const name =
+        msg.name || msg.title || msg.toolName || msg.tool || "result";
       const result =
-        msg.result ?? msg.output ?? msg.data?.result ?? msg.data ?? msg.content;
+        msg.result ?? msg.rawOutput ?? msg.output ?? msg.content ?? msg.status;
       pushTool({
         name,
         kind: "result",
@@ -1060,6 +1190,13 @@ function streamRun(runId, assistantMsgId) {
       paint("running");
     } else if (msg.type === "studio" && msg.event === "permission_request") {
       showPermissionPrompt(runId, msg);
+    } else if (msg.type === "studio" && msg.event === "permission_auto") {
+      pushTool({
+        name: `permission ${msg.decision}`,
+        kind: msg.decision === "deny" ? "error" : "result",
+        detail: formatToolPayload(msg.reason, 200),
+      });
+      paint("running");
     } else if (msg.type === "studio" && msg.event === "budget_exceeded") {
       textAcc += `\n\n[budget] ${msg.message || "Budget exceeded"}`;
       pushTool({
@@ -1100,6 +1237,12 @@ function streamRun(runId, assistantMsgId) {
       paint("failed");
     } else if (msg.type === "studio" && msg.event === "finished") {
       finished = true;
+      // Run is over — drop any prompt still on screen without answering a
+      // request the agent is no longer waiting on.
+      if (state.modal === "permissionPrompt") {
+        state.pendingPermission = null;
+        closeModal();
+      }
       const status =
         msg.status || (msg.exitCode === 0 ? "completed" : "failed");
       // Prefer full session text; if reattached mid-stream, keep accumulated
@@ -1119,9 +1262,9 @@ function streamRun(runId, assistantMsgId) {
       closeStream();
       refreshHealth();
       refreshSessions();
-      if (isNative() && window.grokStudioNative?.notify) {
-        window.grokStudioNative.notify({
-          title: "Grok Studio",
+      if (isNative() && window.heirStudioNative?.notify) {
+        window.heirStudioNative.notify({
+          title: "Heir Studio",
           body: `Run ${status}`,
         });
       }
@@ -1186,8 +1329,14 @@ function showPermissionPrompt(runId, evt) {
         /reject|deny/i.test(o.name || ""),
     ) || null;
 
+  state.pendingPermission = {
+    runId,
+    id: evt.id,
+    denyOptionId: denyOpt?.optionId,
+  };
+
   openModal(
-    "permission",
+    "permissionPrompt",
     "Permission required",
     `
     <div class="perm-prompt">
@@ -1203,26 +1352,24 @@ function showPermissionPrompt(runId, evt) {
   );
 
   const send = async (decision) => {
-    await api(`/api/runs/${runId}/permissions/${encodeURIComponent(evt.id)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(decision),
-    });
+    const pending = state.pendingPermission;
+    // clear first so closeModal does not send a second, contradictory answer
+    state.pendingPermission = null;
+    await respondPermission(pending || { runId, id: evt.id }, decision);
     closeModal();
     toast(decision.deny || decision.cancelled ? "Denied" : "Allowed", "ok");
   };
 
   $("#perm-allow").onclick = () =>
-    send({
-      allow: true,
-      optionId: allowOpt?.optionId,
-    });
+    send({ allow: true, optionId: allowOpt?.optionId }).catch((e) =>
+      toast(e.message),
+    );
   $("#perm-deny").onclick = () =>
     send({
       deny: true,
       cancelled: true,
       optionId: denyOpt?.optionId,
-    });
+    }).catch((e) => toast(e.message));
 }
 
 function autoSizePrompt() {
@@ -1244,11 +1391,82 @@ function openModal(kind, title, html, { wide } = {}) {
 }
 
 function closeModal() {
+  // Dismissing a permission prompt (Escape, backdrop, ×) still owes the agent an
+  // answer — otherwise the ACP turn blocks until the RPC timeout.
+  const pending = state.pendingPermission;
+  state.pendingPermission = null;
   state.modal = null;
   const root = $("#modal-root");
   root.classList.add("hidden");
   root.setAttribute("aria-hidden", "true");
   $("#modal-body").innerHTML = "";
+  if (pending) {
+    respondPermission(pending, {
+      deny: true,
+      cancelled: true,
+      optionId: pending.denyOptionId,
+    })
+      .then(() => toast("Denied"))
+      .catch((e) => toast(e.message));
+  }
+}
+
+function respondPermission({ runId, id }, decision) {
+  return api(`/api/runs/${runId}/permissions/${encodeURIComponent(id)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decision),
+  });
+}
+
+function renderHistoryList() {
+  const list = $("#history-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.historyHits.length) {
+    list.innerHTML = `<div class="muted tiny">No matches</div>`;
+    return;
+  }
+  state.historyHits.forEach((h, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "history-item" + (i === state.historyIndex ? " active" : "");
+    btn.innerHTML = `
+      <div>${escapeHtml(h.text.slice(0, 200))}</div>
+      <div class="hi-meta">${escapeHtml(h.sessionTitle || "")} · ${escapeHtml(shortPath(h.cwd || ""))}</div>
+    `;
+    btn.addEventListener("click", () => {
+      state.historyIndex = i;
+      historyAccept();
+    });
+    list.appendChild(btn);
+  });
+  list.querySelector(".history-item.active")?.scrollIntoView({
+    block: "nearest",
+  });
+}
+
+/** Move the history-search selection. Returns false when not applicable. */
+function historyMove(delta) {
+  if (state.modal !== "history" || !state.historyHits.length) return false;
+  state.historyIndex = Math.min(
+    state.historyHits.length - 1,
+    Math.max(0, state.historyIndex + delta),
+  );
+  renderHistoryList();
+  return true;
+}
+
+/** Put the selected history hit into the composer. Returns false when none. */
+function historyAccept() {
+  if (state.modal !== "history") return false;
+  const h = state.historyHits[state.historyIndex];
+  if (!h) return false;
+  $("#prompt").value = h.text;
+  closeModal();
+  autoSizePrompt();
+  $("#prompt").focus();
+  return true;
 }
 
 async function openHistorySearch() {
@@ -1263,65 +1481,73 @@ async function openHistorySearch() {
     <div class="history-list" id="history-list"></div>
     `,
   );
+  renderHistoryList();
   const input = $("#history-q");
-  const list = $("#history-list");
-  const render = () => {
-    list.innerHTML = "";
-    if (!state.historyHits.length) {
-      list.innerHTML = `<div class="muted tiny">No matches</div>`;
-      return;
-    }
-    state.historyHits.forEach((h, i) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "history-item" + (i === state.historyIndex ? " active" : "");
-      btn.innerHTML = `
-        <div>${escapeHtml(h.text.slice(0, 200))}</div>
-        <div class="hi-meta">${escapeHtml(h.sessionTitle || "")} · ${escapeHtml(shortPath(h.cwd || ""))}</div>
-      `;
-      btn.addEventListener("click", () => {
-        $("#prompt").value = h.text;
-        autoSizePrompt();
-        closeModal();
-        $("#prompt").focus();
-      });
-      list.appendChild(btn);
-    });
-  };
-  render();
   input.focus();
   input.addEventListener("input", async () => {
     const q = input.value.trim();
-    const r = await api(
-      `/api/history?q=${encodeURIComponent(q)}&limit=40`,
-    );
+    const r = await api(`/api/history?q=${encodeURIComponent(q)}&limit=40`);
     state.historyHits = r.hits || [];
     state.historyIndex = 0;
-    render();
+    renderHistoryList();
   });
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
-      e.preventDefault();
-      state.historyIndex = Math.min(
-        state.historyHits.length - 1,
-        state.historyIndex + 1,
-      );
-      render();
-    } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
-      e.preventDefault();
-      state.historyIndex = Math.max(0, state.historyIndex - 1);
-      render();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const h = state.historyHits[state.historyIndex];
-      if (h) {
-        $("#prompt").value = h.text;
-        autoSizePrompt();
-        closeModal();
-        $("#prompt").focus();
-      }
-    }
-  });
+}
+
+// ── Composer prompt recall (Up/Down) ────────────────
+
+async function loadRecall() {
+  if (state.recall.list.length) return;
+  const data = await api("/api/history?limit=50");
+  state.recall.list = (data.hits || []).map((h) => h.text).filter(Boolean);
+}
+
+/** Caret is on the first (or last) visual line — only then do we hijack Up/Down. */
+function caretAtEdge(ta, edge) {
+  if (ta.selectionStart !== ta.selectionEnd) return false;
+  if (edge === "start") return ta.value.lastIndexOf("\n", ta.selectionStart - 1) < 0;
+  return ta.value.indexOf("\n", ta.selectionStart) < 0;
+}
+
+function applyRecall() {
+  const ta = $("#prompt");
+  ta.value =
+    state.recall.index < 0
+      ? state.recall.draft
+      : state.recall.list[state.recall.index] || "";
+  autoSizePrompt();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+/** Older prompt. Returns false to let the caret move normally. */
+function recallPrev() {
+  const ta = $("#prompt");
+  if (document.activeElement !== ta || !caretAtEdge(ta, "start")) return false;
+  if (state.recall.index < 0) state.recall.draft = ta.value;
+  loadRecall()
+    .then(() => {
+      if (state.recall.index + 1 >= state.recall.list.length) return;
+      state.recall.index += 1;
+      applyRecall();
+    })
+    .catch((e) => toast(e.message));
+  return true;
+}
+
+/** Newer prompt, back down to the untouched draft. */
+function recallNext() {
+  const ta = $("#prompt");
+  if (document.activeElement !== ta || state.recall.index < 0) return false;
+  if (!caretAtEdge(ta, "end")) return false;
+  state.recall.index -= 1;
+  applyRecall();
+  return true;
+}
+
+function selectSessionByIndex(i) {
+  const s = state.sessions[i];
+  if (!s) return false;
+  openSession(s.id).catch((e) => toast(e.message));
+  return true;
 }
 
 async function openTranscriptViewer() {
@@ -1502,7 +1728,7 @@ function openKeybindingsHelp() {
     "keybindings",
     "Keyboard shortcuts",
     `
-    <p class="muted tiny">Customize via <code>~/.grok-studio/keybindings.json</code>. forceCancel and emergencyStop are hardcoded.</p>
+    <p class="muted tiny">Customize via <code>~/.heir-studio/keybindings.json</code>. forceCancel and emergencyStop are hardcoded.</p>
     <table class="kb-table">
       <thead><tr><th>Key</th><th>Command</th><th>Context</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -1540,11 +1766,17 @@ const commands = {
   sendMessage: () => {
     sendMessage().catch((e) => alert(e.message));
   },
-  insertNewline: () => {},
+  // returning false hands the key back to the browser (newline, caret movement)
+  insertNewline: () => false,
   closeModal: () => closeModal(),
-  historyAccept: () => {},
-  historyPrev: () => {},
-  historyNext: () => {},
+  // closeModal denies any unanswered request on its way out
+  denyPermission: () => closeModal(),
+  historyAccept: () => historyAccept(),
+  historyPrev: () => (state.modal === "history" ? historyMove(-1) : recallPrev()),
+  historyNext: () => (state.modal === "history" ? historyMove(1) : recallNext()),
+  selectSession1: () => selectSessionByIndex(0),
+  selectSession2: () => selectSessionByIndex(1),
+  selectSession3: () => selectSessionByIndex(2),
   openSshManager: () => openSshManager(),
   openAgentPicker: () => {
     $("#agent-select").focus();
@@ -1741,11 +1973,6 @@ function wireKeybindings() {
         return;
       }
 
-      // Composer: Enter sends, Shift+Enter newline (default browser for shift+enter)
-      if (binding.command === "insertNewline") {
-        return; // allow default
-      }
-
       // When typing in history search, only allow history* + close + nav
       if (
         state.modal === "history" &&
@@ -1769,8 +1996,9 @@ function wireKeybindings() {
 
       const fn = commands[binding.command];
       if (!fn) return;
-      e.preventDefault();
-      fn();
+      // A command returns false when it declines the key (Shift+Enter newline,
+      // Up/Down caret movement with nothing to recall) — let the browser have it.
+      if (fn() !== false) e.preventDefault();
     },
     true,
   );
@@ -1795,12 +2023,15 @@ async function init() {
     browseProject().catch((e) => alert(e.message));
   });
   $("#btn-attach").addEventListener("click", () => {
-    if (isNative()) window.grokStudioNative.openImages();
+    if (isNative()) window.heirStudioNative.openImages();
     else $("#file-input").click();
   });
   $("#btn-history").addEventListener("click", () => openHistorySearch());
   $("#btn-transcript").addEventListener("click", () => openTranscriptViewer());
   $("#btn-checkpoint").addEventListener("click", () => openCheckpoints());
+  $("#btn-compact").addEventListener("click", () => {
+    compactActiveSession().catch((e) => toast(e.message, "err"));
+  });
   $("#btn-settings").addEventListener("click", () => openSettings());
   $("#perm-chip").addEventListener("click", () => cyclePermission());
   $("#think-chip").addEventListener("click", () => toggleThinking());
@@ -1842,16 +2073,16 @@ async function init() {
       el.classList.remove("hidden");
     }
     $("#btn-open-native")?.addEventListener("click", () => {
-      window.grokStudioNative.openImages();
+      window.heirStudioNative.openImages();
     });
     $("#btn-reveal-out")?.addEventListener("click", () => {
-      window.grokStudioNative.revealOutputs();
+      window.heirStudioNative.revealOutputs();
     });
-    window.grokStudioNative.onImagesImported?.(async (files) => {
+    window.heirStudioNative.onImagesImported?.(async (files) => {
       for (const f of files || []) state.selected.add(f.name);
       await refreshUploads();
     });
-    window.grokStudioNative.onProjectOpened?.(async (p) => {
+    window.heirStudioNative.onProjectOpened?.(async (p) => {
       await setProject(p);
     });
   }
@@ -1877,6 +2108,7 @@ async function init() {
 
   await refreshUploads();
   await refreshSessions();
+  subscribeHub();
 
   if (state.activeSessionId) {
     await openSession(state.activeSessionId);

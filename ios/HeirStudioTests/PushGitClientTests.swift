@@ -1,3 +1,4 @@
+import UserNotifications
 import XCTest
 
 @testable import HeirStudio
@@ -20,6 +21,65 @@ final class PushTokenTests: XCTestCase {
         XCTAssertEqual(PushRouting.stopAction, "STOP")
         XCTAssertEqual(PushRouting.openAction, "OPEN")
     }
+
+    func testStatusTextBeforePrompt() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .notDetermined,
+                hexToken: nil,
+                registeredOnMac: false,
+                lastError: nil),
+            "Not asked yet")
+    }
+
+    func testStatusTextWhenDenied() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .denied,
+                hexToken: nil,
+                registeredOnMac: false,
+                lastError: nil),
+            "Off — enable in iPhone Settings")
+    }
+
+    func testStreamAfterQuery() {
+        let path = StudioClient.queryURL(
+            path: "/api/runs/abc/stream",
+            items: [URLQueryItem(name: "after", value: "12")])
+        XCTAssertTrue(path.contains("after=12"))
+    }
+
+    func testCompactResultDecodes() throws {
+        let json = """
+            {"ok":true,"grokSessionId":"g1",
+             "context":{"used":12000,"total":80000,"percent":15,"trigger":"manual"}}
+            """
+        let result = try JSONDecoder().decode(CompactResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.ok, true)
+        XCTAssertEqual(result.context?.percent, 15)
+        XCTAssertEqual(result.context?.trigger, "manual")
+    }
+
+    func testStatusTextWhenAuthorizedButNotUploaded() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .authorized,
+                hexToken: "ab".repeatToken(),
+                registeredOnMac: false,
+                lastError: nil),
+            "On this phone — Mac not registered yet")
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .authorized,
+                hexToken: "ab".repeatToken(),
+                registeredOnMac: true,
+                lastError: nil),
+            "On")
+    }
+}
+
+private extension String {
+    func repeatToken() -> String { String(repeating: self, count: 32) }
 }
 
 final class PushPayloadTests: XCTestCase {

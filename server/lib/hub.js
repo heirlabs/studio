@@ -77,5 +77,8 @@ export function sessionHubPayload(session) {
     activeRunId: session.activeRunId || null,
     updatedAt: session.updatedAt,
     messageCount: Array.isArray(session.messages) ? session.messages.length : undefined,
+    context: session.context || null,
+    lastPreview: session.lastPreview || null,
+    grokSessionId: session.grokSessionId || null,
   };
 }

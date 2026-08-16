@@ -7,7 +7,13 @@
  */
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
+import { createRequire } from "module";
+import { evaluateToolPolicy } from "./sandbox.js";
+import { providerToAgentCliArgs } from "./providers.js";
+
+const { version: STUDIO_VERSION } = createRequire(import.meta.url)(
+  "../../package.json",
+);
 
 /**
  * Whether this permission mode needs an interactive approval channel (ACP).
@@ -16,6 +22,66 @@ import { randomUUID } from "crypto";
 export function needsInteractiveApprovals(permissionMode) {
   const m = String(permissionMode || "default");
   return m === "default" || m === "acceptEdits";
+}
+
+/**
+ * ACP toolCall.kind values that `acceptEdits` approves without prompting.
+ * Anything that shells out or reaches the network ("execute", "fetch") still asks.
+ */
+const AUTO_APPROVED_KINDS = new Set(["edit", "read", "search"]);
+const AUTO_APPROVED_TITLE_RE =
+  /^(edit|write|create|read|apply|patch|str_replace|search|grep|glob|list)/i;
+
+/**
+ * Whether a tool call is a file edit/read that `acceptEdits` may auto-approve.
+ * Falls back to the title when the agent omits `kind`.
+ */
+export function isAutoApprovableToolCall(toolCall) {
+  const kind = String(toolCall?.kind || "").toLowerCase();
+  if (kind) return AUTO_APPROVED_KINDS.has(kind);
+  return AUTO_APPROVED_TITLE_RE.test(String(toolCall?.title || ""));
+}
+
+/**
+ * Pick the option representing "allow" from an ACP permission option list.
+ */
+export function pickAllowOption(options = []) {
+  return (
+    options.find((o) => o.kind === "allow_once") ||
+    options.find((o) => o.kind === "allow_always") ||
+    options.find((o) => /allow|approve|yes/i.test(o.name || o.optionId || "")) ||
+    null
+  );
+}
+
+/**
+ * Decide a permission request without the user when studio policy already
+ * determines the answer. Pure — the transport applies the result.
+ *
+ * @returns {{ action: "allow"|"deny"|"ask", optionId?: string, reason?: string }}
+ */
+export function decidePermission({
+  permissionMode,
+  sandbox,
+  toolCall,
+  options = [],
+} = {}) {
+  const toolName = toolCall?.title || toolCall?.kind || "";
+  const policy = evaluateToolPolicy(toolName, { permissionMode, sandbox });
+  if (!policy.allowed) {
+    return { action: "deny", reason: policy.reason };
+  }
+  if (permissionMode === "acceptEdits" && isAutoApprovableToolCall(toolCall)) {
+    const opt = pickAllowOption(options);
+    if (opt) {
+      return {
+        action: "allow",
+        optionId: opt.optionId,
+        reason: `acceptEdits auto-approved ${toolName || "tool"}`,
+      };
+    }
+  }
+  return { action: "ask" };
 }
 
 /**
@@ -50,19 +116,24 @@ export function acpUpdateToStudioEvents(update) {
       "";
     if (text) out.push({ type: "thought", data: text });
   } else if (kind === "tool_call") {
+    // Naming and toolCallId correlation are normalizeStreamEvent's job, so
+    // both transports label cards the same way — pass the raw fields through.
     out.push({
       type: "tool_call",
-      name: update.title || update.kind || update.toolCallId || "tool",
+      title: update.title || update.kind || null,
       toolCallId: update.toolCallId || update.id || null,
+      kind: update.kind || null,
       input: update.rawInput ?? update.input ?? update.arguments ?? null,
       status: update.status || "pending",
       acp: true,
     });
   } else if (kind === "tool_call_update") {
+    // An ACP update's `title` is prose ("Read `/abs/path.txt`"), not a tool
+    // name — keep it as detail and let the update inherit its call's name.
     out.push({
       type: "tool_result",
-      name: update.title || update.toolCallId || "tool",
       toolCallId: update.toolCallId || update.id || null,
+      detail: update.title || null,
       result: update.rawOutput ?? update.content ?? update.status ?? null,
       status: update.status || "completed",
       acp: true,
@@ -93,6 +164,20 @@ export function jsonRpcError(id, code, message) {
 }
 
 /**
+ * argv for `grok agent … stdio`. Options precede the subcommand, per
+ * `grok agent [OPTIONS] [COMMAND]`. Shared so a run's recorded meta.args is
+ * exactly what was spawned.
+ */
+export function buildAcpArgs({ alwaysApprove, model, extraArgs = [] } = {}) {
+  const args = ["agent"];
+  if (alwaysApprove) args.push("--always-approve");
+  if (model) args.push("-m", String(model));
+  args.push(...extraArgs);
+  args.push("--no-leader", "stdio");
+  return args;
+}
+
+/**
  * Long-lived ACP connection to `grok agent stdio`.
  */
 export class AcpClient extends EventEmitter {
@@ -106,6 +191,7 @@ export class AcpClient extends EventEmitter {
     this.env = opts.env || process.env;
     this.alwaysApprove = Boolean(opts.alwaysApprove);
     this.model = opts.model || null;
+    this.extraArgs = opts.extraArgs || [];
     this.proc = null;
     this.sessionId = null;
     this.nextId = 1;
@@ -123,10 +209,11 @@ export class AcpClient extends EventEmitter {
     if (this.proc) {
       throw new Error("ACP client already started");
     }
-    const args = ["agent"];
-    if (this.alwaysApprove) args.push("--always-approve");
-    if (this.model) args.push("-m", this.model);
-    args.push("--no-leader", "stdio");
+    const args = buildAcpArgs({
+      alwaysApprove: this.alwaysApprove,
+      model: this.model,
+      extraArgs: this.extraArgs,
+    });
 
     this.proc = spawn(this.grokBin, args, {
       cwd: this.cwd,
@@ -291,8 +378,8 @@ export class AcpClient extends EventEmitter {
     return this.request("initialize", {
       protocolVersion: 1,
       clientInfo: {
-        name: "grok-studio",
-        version: "1.6.0",
+        name: "heir-studio",
+        version: STUDIO_VERSION,
       },
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
@@ -316,6 +403,34 @@ export class AcpClient extends EventEmitter {
     });
     this.sessionId = result.sessionId;
     return result;
+  }
+
+  /**
+   * Resume a previous ACP conversation so the next prompt sees prior turns.
+   * Interactive Studio used to call session/new every time, which made
+   * compact and multi-turn memory a no-op.
+   */
+  async loadSession(opts) {
+    const result = await this.request("session/load", {
+      sessionId: opts.sessionId,
+      cwd: opts.cwd,
+      mcpServers: [],
+    });
+    this.sessionId = result.sessionId || opts.sessionId;
+    return result;
+  }
+
+  /**
+   * TUI `/compact [note]` over ACP. Requires an already-loaded session.
+   */
+  async compactConversation({ note } = {}) {
+    if (!this.sessionId) {
+      throw new Error("No ACP session — call loadSession or newSession first");
+    }
+    return this.request("x.ai/compact_conversation", {
+      sessionId: this.sessionId,
+      context: note || undefined,
+    });
   }
 
   /**
@@ -402,9 +517,10 @@ export class AcpClient extends EventEmitter {
         this.proc.stdin.end();
       }
       this.kill("SIGTERM");
+      // unref so a lingering agent never holds the process open
       setTimeout(() => {
         if (this.proc && !this.proc.killed) this.kill("SIGKILL");
-      }, 3000);
+      }, 3000).unref();
     }
     this.closed = true;
   }
@@ -420,8 +536,11 @@ export function runAcpTurn({
   env,
   model,
   permissionMode,
+  sandbox,
+  provider,
   prompt,
   attachments,
+  resumeSessionId,
   onEvent,
   onPermissionRequest,
 }) {
@@ -433,11 +552,19 @@ export function runAcpTurn({
     env,
     alwaysApprove,
     model,
+    extraArgs: providerToAgentCliArgs(provider),
   });
+
+  // AcpClient is an EventEmitter: an "error" event with no listener is rethrown
+  // and takes the whole server down. Own it here — the failure still surfaces
+  // through `done`, because _failAll rejects every in-flight request.
+  client.on("error", (err) => {
+    onEvent?.({ type: "error", message: err.message });
+  });
+
   client.start();
 
   const meta = permissionModeToAcpMeta(permissionMode);
-  let finished = false;
 
   client.on("session_update", (params) => {
     const update = params.update || params;
@@ -451,6 +578,29 @@ export function runAcpTurn({
   });
 
   client.on("permission_request", (req) => {
+    const verdict = decidePermission({
+      permissionMode,
+      sandbox,
+      toolCall: req.toolCall,
+      options: req.options,
+    });
+    if (verdict.action !== "ask") {
+      onEvent?.({
+        type: "studio",
+        event: "permission_auto",
+        id: req.id,
+        decision: verdict.action,
+        reason: verdict.reason,
+        toolCall: req.toolCall,
+      });
+      client.respondPermission(
+        req.id,
+        verdict.action === "allow"
+          ? { outcome: "selected", optionId: verdict.optionId }
+          : { outcome: "cancelled" },
+      );
+      return;
+    }
     onEvent?.({
       type: "studio",
       event: "permission_request",
@@ -464,18 +614,38 @@ export function runAcpTurn({
 
   const done = (async () => {
     await client.initialize();
-    await client.newSession({
-      cwd,
-      yoloMode: Boolean(meta.yoloMode),
-      autoMode: Boolean(meta.autoMode),
-    });
+    let resumed = false;
+    if (resumeSessionId) {
+      try {
+        await client.loadSession({ cwd, sessionId: resumeSessionId });
+        resumed = true;
+      } catch (err) {
+        onEvent?.({
+          type: "studio",
+          event: "session_resume_failed",
+          message: err.message,
+          grokSessionId: resumeSessionId,
+        });
+        await client.newSession({
+          cwd,
+          yoloMode: Boolean(meta.yoloMode),
+          autoMode: Boolean(meta.autoMode),
+        });
+      }
+    } else {
+      await client.newSession({
+        cwd,
+        yoloMode: Boolean(meta.yoloMode),
+        autoMode: Boolean(meta.autoMode),
+      });
+    }
     onEvent?.({
       type: "studio",
       event: "acp_session",
       sessionId: client.sessionId,
+      resumed,
     });
     const result = await client.prompt(prompt, { attachments });
-    finished = true;
     onEvent?.({
       type: "end",
       stopReason: result?.stopReason || "EndTurn",
@@ -485,11 +655,16 @@ export function runAcpTurn({
     return result;
   })();
 
-  done.finally(() => {
-    if (!finished) return;
-    // Keep process briefly so final notifications flush, then dispose
-    setTimeout(() => client.dispose(), 100);
-  });
+  // Always tear the agent down — a failed turn used to leave `grok agent stdio`
+  // running forever. Two handlers (not .finally) so this derived promise always
+  // resolves; the caller owns `done` and its rejection.
+  done.then(
+    () => {
+      // brief grace so trailing session/update notifications flush
+      setTimeout(() => client.dispose(), 100).unref();
+    },
+    () => client.dispose(),
+  );
 
   return {
     client,
@@ -502,8 +677,4 @@ export function runAcpTurn({
       client.respondPermission(id, decision);
     },
   };
-}
-
-export function generatePermissionId() {
-  return randomUUID();
 }

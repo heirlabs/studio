@@ -123,6 +123,14 @@ async function runAcp() {
       continue;
     }
 
+    if (msg.method === "x.ai/rewind") {
+      respond(msg.id, {
+        ok: true,
+        userMessageIndex: msg.params?.userMessageIndex ?? 0,
+      });
+      continue;
+    }
+
     if (msg.method === "session/cancel") continue;
 
     if (msg.method === "session/prompt") {

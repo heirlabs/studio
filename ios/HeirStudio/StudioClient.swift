@@ -27,16 +27,29 @@ enum StudioError: LocalizedError, Equatable {
 struct ServerConfig: Codable, Equatable, Sendable {
     var baseURL: URL
     var token: String
+    /// Cloudflare Access service token. Optional until Access is enabled
+    /// in front of the hostname; then both headers are required.
+    var accessClientId: String?
+    var accessClientSecret: String?
 
     /// Accepts "100.101.102.103:3847" as well as a full URL.
-    static func parse(urlString: String, token: String) throws -> ServerConfig {
+    static func parse(
+        urlString: String,
+        token: String,
+        accessClientId: String? = nil,
+        accessClientSecret: String? = nil
+    ) throws -> ServerConfig {
         var s = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { throw StudioError.badURL(urlString) }
         if !s.contains("://") { s = "http://" + s }
         guard let url = URL(string: s), url.host != nil else {
             throw StudioError.badURL(urlString)
         }
-        return ServerConfig(baseURL: url, token: token)
+        return ServerConfig(
+            baseURL: url,
+            token: token,
+            accessClientId: accessClientId,
+            accessClientSecret: accessClientSecret)
     }
 }
 
@@ -67,6 +80,16 @@ actor StudioClient {
 
     var isConfigured: Bool { config != nil }
 
+    private func applyAuth(_ req: inout URLRequest, config: ServerConfig) {
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        if let id = config.accessClientId, !id.isEmpty,
+            let secret = config.accessClientSecret, !secret.isEmpty
+        {
+            req.setValue(id, forHTTPHeaderField: "CF-Access-Client-Id")
+            req.setValue(secret, forHTTPHeaderField: "CF-Access-Client-Secret")
+        }
+    }
+
     private func request(_ path: String, method: String = "GET", body: Encodable? = nil) throws
         -> URLRequest
     {
@@ -76,7 +99,7 @@ actor StudioClient {
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        applyAuth(&req, config: config)
         req.timeoutInterval = method == "GET" && (path.hasPrefix("/api/events") || path.contains("/stream"))
             ? 0
             : 30
@@ -93,6 +116,9 @@ actor StudioClient {
         let message = (try? JSONDecoder().decode(APIError.self, from: data))?.error ?? ""
         switch http.statusCode {
         case 401: throw StudioError.unauthorized
+        case 429:
+            throw StudioError.forbidden(
+                message.isEmpty ? "Too many failed attempts. Wait a minute and retry." : message)
         case 403: throw StudioError.forbidden(message.isEmpty ? "Refused by the Mac." : message)
         default: throw StudioError.http(http.statusCode, message)
         }
@@ -261,7 +287,7 @@ actor StudioClient {
         let boundary = "heir-\(UUID().uuidString)"
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        applyAuth(&req, config: config)
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         req.timeoutInterval = 120
 
@@ -351,6 +377,17 @@ actor StudioClient {
         try await send(request("/api/sessions/\(id)/context"), as: ContextResponse.self)
     }
 
+    func rewindPoints(_ id: String) async throws -> RewindList {
+        try await send(request("/api/sessions/\(id)/rewinds"), as: RewindList.self)
+    }
+
+    func rewindSession(_ id: String, to messageId: String) async throws -> RewindResult {
+        struct Body: Encodable { let messageId: String }
+        return try await send(
+            request("/api/sessions/\(id)/rewind", method: "POST", body: Body(messageId: messageId)),
+            as: RewindResult.self)
+    }
+
     func history(query: String, limit: Int = 40) async throws -> [HistoryHit] {
         let items = [
             URLQueryItem(name: "q", value: query),
@@ -423,9 +460,12 @@ actor StudioClient {
                     if let http = response as? HTTPURLResponse,
                         !(200..<300).contains(http.statusCode)
                     {
-                        throw http.statusCode == 401
-                            ? StudioError.unauthorized
-                            : StudioError.http(http.statusCode, "")
+                        if http.statusCode == 401 { throw StudioError.unauthorized }
+                        if http.statusCode == 429 {
+                            throw StudioError.forbidden(
+                                "Too many failed attempts. Wait a minute and retry.")
+                        }
+                        throw StudioError.http(http.statusCode, "")
                     }
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }

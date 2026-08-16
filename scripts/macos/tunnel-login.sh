@@ -16,6 +16,13 @@ fi
 ROOT="/Users/futjr/grok-studio"
 cd "$ROOT"
 
+# Pairing tokens used to land in the LaunchAgent log at 0644. Keep that file
+# owner-only even if announce() regresses.
+umask 077
+if [ -f "${HOME}/Library/Logs/heir-studio-tunnel.log" ]; then
+  chmod 600 "${HOME}/Library/Logs/heir-studio-tunnel.log" 2>/dev/null || true
+fi
+
 if [ -f "$ROOT/.env.tunnel" ]; then
   set -a
   # shellcheck disable=SC1091

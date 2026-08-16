@@ -10,6 +10,19 @@ struct SessionListView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let live = model.sessions.first(where: { $0.isLive })
+                    ?? model.sessions.first
+                {
+                    Section {
+                        Button {
+                            model.openSession(id: live.id)
+                        } label: {
+                            Label(
+                                live.isLive ? "Continue live chat" : "Continue last chat",
+                                systemImage: live.isLive ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
+                        }
+                    }
+                }
                 if model.sessions.isEmpty {
                     ContentUnavailableView(
                         "No chats yet",
@@ -27,6 +40,11 @@ struct SessionListView: View {
                                         .font(.system(size: 7))
                                         .foregroundStyle(.green)
                                 }
+                            }
+                            if let percent = session.context?.percent {
+                                Text("ctx \(percent)%")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
                             }
                             if let preview = session.lastPreview, !preview.isEmpty {
                                 Text(preview)

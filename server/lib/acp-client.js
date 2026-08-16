@@ -434,6 +434,20 @@ export class AcpClient extends EventEmitter {
   }
 
   /**
+   * TUI `/rewind` over ACP. `userMessageIndex` is the 0-based user turn to
+   * keep (later turns are dropped). Files on disk are not reverted.
+   */
+  async rewindConversation({ userMessageIndex } = {}) {
+    if (!this.sessionId) {
+      throw new Error("No ACP session — call loadSession or newSession first");
+    }
+    return this.request("x.ai/rewind", {
+      sessionId: this.sessionId,
+      userMessageIndex: Number(userMessageIndex) || 0,
+    });
+  }
+
+  /**
    * Send a user prompt. Streams session/update via events until the RPC returns.
    */
   async prompt(text, { attachments = [] } = {}) {

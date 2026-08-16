@@ -6,28 +6,44 @@
  * re-pairing after every restart. Quick tunnels are throwaway and must be asked
  * for explicitly.
  *
- * Pure — the script does the spawning.
+ * Pure — the script does the spawning. The connector token is never placed on
+ * argv (`ps` would leak it); callers write it to a 0600 file and pass
+ * `--token-file`.
  */
 
+import os from "os";
+import path from "path";
+
+export function defaultTunnelTokenFile(home = os.homedir()) {
+  return path.join(home, ".cloudflared", "heir-studio.token");
+}
+
 /**
- * @param {{ env: object, certExists: boolean, port: number }} input
+ * @param {{ env: object, certExists: boolean, port: number, home?: string }} input
  * @returns {{ mode?: "token"|"named"|"quick", url?: string|null, hostname?: string|null,
- *             args?: string[], error?: string, hints?: string[] }}
+ *             args?: string[], writeTokenFile?: { path: string, contents: string },
+ *             error?: string, hints?: string[] }}
  */
-export function resolveTunnelPlan({ env = {}, certExists = false, port = 3847 } = {}) {
+export function resolveTunnelPlan({
+  env = {},
+  certExists = false,
+  port = 3847,
+  home = os.homedir(),
+} = {}) {
   const hostname = (env.HEIR_STUDIO_TUNNEL_HOSTNAME || "").trim();
   const token = (env.CLOUDFLARE_TUNNEL_TOKEN || "").trim();
+  const tokenFile = (env.CLOUDFLARE_TUNNEL_TOKEN_FILE || "").trim();
   const name = (env.HEIR_STUDIO_TUNNEL_NAME || "").trim();
   const allowQuick = env.HEIR_STUDIO_TUNNEL_QUICK === "1";
   const local = `http://127.0.0.1:${port}`;
 
   // Dashboard-managed ("remotely-managed") tunnel: ingress lives in Cloudflare,
   // so no --url here. The token alone identifies the tunnel.
-  if (token) {
+  if (token || tokenFile) {
     if (!hostname) {
       return {
         error:
-          "CLOUDFLARE_TUNNEL_TOKEN is set but HEIR_STUDIO_TUNNEL_HOSTNAME is not.",
+          "A Cloudflare tunnel token is set but HEIR_STUDIO_TUNNEL_HOSTNAME is not.",
         hints: [
           "The token says which tunnel to run; the hostname is what the phone connects to.",
           "Set it to the public hostname you mapped in the Zero Trust dashboard, e.g.",
@@ -36,11 +52,14 @@ export function resolveTunnelPlan({ env = {}, certExists = false, port = 3847 } 
         ],
       };
     }
+    const filePath = tokenFile || defaultTunnelTokenFile(home);
     return {
       mode: "token",
       hostname,
       url: `https://${hostname}`,
-      args: ["tunnel", "--no-autoupdate", "run", "--token", token],
+      args: ["tunnel", "--no-autoupdate", "run", "--token-file", filePath],
+      // Only write when the token arrived via env — a pre-placed file is used as-is.
+      writeTokenFile: token ? { path: filePath, contents: token } : undefined,
     };
   }
 

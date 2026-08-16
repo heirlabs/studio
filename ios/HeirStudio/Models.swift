@@ -49,6 +49,26 @@ struct SessionContext: Codable, Sendable, Hashable {
     let tokensAfter: Int?
 }
 
+struct RewindPoint: Codable, Identifiable, Sendable, Hashable {
+    let id: String
+    let index: Int?
+    let text: String?
+    let createdAt: Double?
+}
+
+struct RewindList: Codable, Sendable {
+    let points: [RewindPoint]
+    let active: Bool?
+}
+
+struct RewindResult: Codable, Sendable {
+    let ok: Bool?
+    let grokRewound: Bool?
+    let grokError: String?
+    let filesReverted: Bool?
+    let session: SessionDetail?
+}
+
 struct CompactResult: Codable, Sendable {
     let ok: Bool?
     let grokSessionId: String?

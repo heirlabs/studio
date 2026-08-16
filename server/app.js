@@ -41,6 +41,7 @@ import {
   restoreSessionFromCheckpoint,
   searchMessageHistory,
   listRecentUserPrompts,
+  listRewindPoints,
   setSessionActiveRun,
   findRunningAssistant,
 } from "./lib/sessions.js";
@@ -82,6 +83,7 @@ import {
   compactGrokSession,
   sessionContext,
 } from "./lib/compact.js";
+import { rewindGrokSession } from "./lib/rewind.js";
 import { SANDBOX_PROFILES } from "./lib/sandbox.js";
 import {
   listBackgroundJobs,
@@ -181,14 +183,6 @@ export function createApp(overrides = {}) {
 
     // Only throttle the authenticated path; a trusted local UI is never gated.
     const gated = !isLoopbackIp || cfg.trustLoopback === false;
-    if (gated) {
-      const { blocked, retryAfterMs } = authThrottle.check();
-      if (blocked) {
-        res.set("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
-        res.status(429).json({ error: "Too many failed attempts." });
-        return;
-      }
-    }
 
     const verdict = evaluateAccess({
       ip,
@@ -201,8 +195,19 @@ export function createApp(overrides = {}) {
       trustLoopback: cfg.trustLoopback !== false,
       viaTunnel: requestLooksTunneled(req),
     });
-    if (!verdict.allow) {
+    // A valid token always gets through and clears the lockout. Otherwise a
+    // phone still holding a rotated token will 401-retry the hub and lock
+    // the real pairing attempt out for a minute.
+    if (verdict.allow) {
+      if (gated) authThrottle.recordSuccess();
+    } else {
       if (gated && verdict.status === 401) {
+        const { blocked, retryAfterMs } = authThrottle.check();
+        if (blocked) {
+          res.set("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+          res.status(429).json({ error: "Too many failed attempts." });
+          return;
+        }
         const { locked } = authThrottle.recordFailure();
         if (locked) log.warn("remote.auth_locked_out", { ip });
       }
@@ -210,7 +215,6 @@ export function createApp(overrides = {}) {
       res.status(verdict.status).json({ error: verdict.error });
       return;
     }
-    if (gated) authThrottle.recordSuccess();
     req.isRemoteClient = verdict.remote;
     next();
   });
@@ -269,15 +273,10 @@ export function createApp(overrides = {}) {
             ? "bypassPermissions"
             : s.permissionMode;
 
-    // A remote client must not get blanket auto-approval by inheriting the
-    // local default — if its token ever leaked that would be a remote shell.
-    // Bypass stays possible, but only when asked for explicitly.
+    // A remote client must not get blanket auto-approval. The request flag
+    // used to opt back in; a stolen token then became a silent shell.
     let permissionDowngradedFrom = null;
-    if (
-      remote &&
-      permissionMode === "bypassPermissions" &&
-      body.allowBypassPermissions !== true
-    ) {
+    if (remote && permissionMode === "bypassPermissions") {
       permissionDowngradedFrom = permissionMode;
       permissionMode = "default";
     }
@@ -989,6 +988,8 @@ export function createApp(overrides = {}) {
         cfg.remoteEnabled && tailnetIp ? `http://${tailnetIp}:${cfg.port}` : null,
       token: record?.token || null,
       createdAt: record?.createdAt || null,
+      accessClientId: process.env.CF_ACCESS_CLIENT_ID || null,
+      accessClientSecret: process.env.CF_ACCESS_CLIENT_SECRET || null,
       allowedCidrs: remoteAllowedCidrs,
       listeningOnTailnet: Boolean(tailnetIp) && cfg.host === tailnetIp,
       hints: buildPairingHints(cfg, tailnetIp),
@@ -1289,6 +1290,55 @@ export function createApp(overrides = {}) {
       active: Boolean(session.activeRunId),
       context: sessionContext(session),
     });
+  });
+
+  app.get("/api/sessions/:id/rewinds", (req, res) => {
+    const session = getSession(cfg.data, req.params.id);
+    if (!session) {
+      res.status(404).json({ error: "session not found" });
+      return;
+    }
+    res.json({
+      points: listRewindPoints(session),
+      active: Boolean(session.activeRunId),
+    });
+  });
+
+  app.post("/api/sessions/:id/rewind", async (req, res) => {
+    try {
+      const session = getSession(cfg.data, req.params.id);
+      if (!session) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      const messageId = req.body?.messageId;
+      if (!messageId) {
+        res.status(400).json({ error: "messageId is required" });
+        return;
+      }
+      const result = await rewindGrokSession({
+        dataDir: cfg.data,
+        session,
+        messageId,
+        grokBin: cfg.grokBin,
+        cwd: session.cwd || cfg.defaultProjectCwd,
+      });
+      hub.publish({
+        type: "session",
+        event: "rewound",
+        sessionId: req.params.id,
+        messageId,
+        session: sessionHubPayload(result.session),
+      });
+      log.info("session.rewind", {
+        sessionId: req.params.id,
+        messageId,
+        grokRewound: result.grokRewound,
+      });
+      res.json(result);
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
   });
 
   app.post("/api/sessions/:id/compact", async (req, res) => {

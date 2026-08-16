@@ -75,6 +75,14 @@ const handle = await startServer({
 
 const { token } = loadOrCreateToken(handle.cfg.data);
 
+if (plan.writeTokenFile) {
+  fs.mkdirSync(path.dirname(plan.writeTokenFile.path), { recursive: true });
+  fs.writeFileSync(plan.writeTokenFile.path, plan.writeTokenFile.contents, {
+    mode: 0o600,
+  });
+  fs.chmodSync(plan.writeTokenFile.path, 0o600);
+}
+
 const cloudflared = spawn("cloudflared", plan.args, {
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -123,24 +131,35 @@ if (plan.url) {
 }
 
 function announce(url) {
-  const deepLink = `heirstudio://pair?url=${encodeURIComponent(url)}&token=${encodeURIComponent(token)}`;
+  const accessId = (process.env.CF_ACCESS_CLIENT_ID || "").trim();
+  const accessSecret = (process.env.CF_ACCESS_CLIENT_SECRET || "").trim();
+  let deepLink = `heirstudio://pair?url=${encodeURIComponent(url)}&token=${encodeURIComponent(token)}`;
+  if (accessId && accessSecret) {
+    deepLink +=
+      `&access_client_id=${encodeURIComponent(accessId)}` +
+      `&access_client_secret=${encodeURIComponent(accessSecret)}`;
+  }
+  const pairFile = path.join(handle.cfg.data, "pairing.url");
+  fs.writeFileSync(pairFile, `${deepLink}\n`, { mode: 0o600 });
+  fs.chmodSync(pairFile, 0o600);
   const stable = plan.mode !== "quick";
   console.log(`
   Heir Studio is reachable from your phone.
 
     URL    ${url}
-    Token  ${token}
     Tunnel ${plan.mode}${stable ? " (stable — pair once)" : " (throwaway — changes every restart)"}
 
-  Pair by opening this link on the phone — send it to yourself in Messages or
-  Notes and tap it. It pre-fills the fields; you still tap Connect.
+  The pairing secret is not printed. On this Mac only:
 
-    ${deepLink}
+    open "$(tr -d '\\n' < ${pairFile})"
 
-  ⚠ This URL is on the public internet. The token is the only thing between it
-    and a shell on this Mac. Anyone who gets both is in.
-      · Rotate immediately if leaked:  curl -X POST http://127.0.0.1:${handle.port}/api/remote/rotate
-      ${stable ? "· A permanent hostname is always reachable. Consider putting Cloudflare\n        Access in front of it for a second factor." : "· Stop the tunnel (Ctrl-C) when you are done."}
+  Loopback pairing JSON also needs the current token (trustLoopback is off).
+  Do not paste the pairing link into Messages, Notes, or a chat.
+
+  ⚠ ${url} is on the public internet. Put Cloudflare Access in front of it.
+    A stolen pairing token is still a shell on this Mac.
+      · Rotate:  curl -X POST http://127.0.0.1:${handle.port}/api/remote/rotate
+      ${stable ? "· Then re-pair the phone from this Mac (loopback pairing URL above)." : "· Stop the tunnel (Ctrl-C) when you are done."}
 `);
 }
 

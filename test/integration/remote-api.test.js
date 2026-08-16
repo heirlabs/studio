@@ -258,7 +258,7 @@ describe("authenticated remote access", () => {
     fs.rmSync(path.join(ctx.data, "settings.local.json"), { force: true });
   });
 
-  it("still allows bypass when the client explicitly opts in", async () => {
+  it("ignores allowBypassPermissions from a remote client", async () => {
     const res = await fetch(`${ctx.base}/api/runs`, {
       method: "POST",
       headers: {
@@ -277,8 +277,8 @@ describe("authenticated remote access", () => {
     });
     const body = await res.json();
     assert.equal(res.status, 201);
-    assert.equal(body.meta.permissionMode, "bypassPermissions");
-    assert.equal(body.permissionDowngradedFrom, null);
+    assert.equal(body.meta.permissionMode, "default");
+    assert.equal(body.permissionDowngradedFrom, "bypassPermissions");
   });
 
   it("streams run events to an authenticated remote client", async () => {
@@ -296,8 +296,7 @@ describe("authenticated remote access", () => {
         workflowId: "code-agent",
         prompt: "stream to my phone",
         cwd: ROOT,
-        permissionMode: "bypassPermissions",
-        allowBypassPermissions: true,
+        permissionMode: "default",
         interactive: false,
       }),
     });
@@ -573,11 +572,15 @@ describe("brute-force throttling on the tunnelled path", () => {
     assert.ok(sawLockout, "expected a 429 lockout after repeated failures");
   });
 
-  it("the lockout applies to a valid token too, until it expires", async () => {
+  it("a valid token still works during lockout and clears it", async () => {
     const res = await fetch(`${ctx.base}/api/health`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    assert.equal(res.status, 429, "a locked-out window must not be bypassable");
+    assert.equal(res.status, 200);
+    const again = await fetch(`${ctx.base}/api/health`, {
+      headers: { Authorization: "Bearer still-wrong" },
+    });
+    assert.equal(again.status, 401, "lockout should have been cleared by success");
   });
 });
 

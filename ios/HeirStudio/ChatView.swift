@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var showGit = false
     @State private var showCheckpoints = false
     @State private var showRunSettings = false
+    @State private var showCompact = false
+    @State private var showRewind = false
 
     init(sessionId: String, initialTitle: String) {
         self.sessionId = sessionId
@@ -35,17 +37,19 @@ struct ChatView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("Compact context") {
-                        Task { await model.compact() }
-                    }
-                    .disabled(model.isRunning || model.compacting)
+                    Button("Compact context…") { showCompact = true }
+                        .disabled(model.isRunning || model.compacting)
+                    Button("Rewind…") { showRewind = true }
+                        .disabled(model.isRunning)
                     Button("Checkpoints") { showCheckpoints = true }
                     Button("Model, budget, worktree") { showRunSettings = true }
-                    if let percent = model.context?.percent {
-                        Text("Context \(percent)%")
-                    }
                 } label: {
-                    Image(systemName: "rectangle.compress.vertical")
+                    if let percent = model.context?.percent {
+                        Text("ctx \(percent)%")
+                            .font(.caption.monospacedDigit())
+                    } else {
+                        Image(systemName: "rectangle.compress.vertical")
+                    }
                 }
                 .accessibilityLabel("Context")
             }
@@ -78,6 +82,10 @@ struct ChatView: View {
             }
         }
         .task { await model.load() }
+        .onReceive(NotificationCenter.default.publisher(for: .heirOpenRewind)) { note in
+            guard (note.object as? String) == sessionId else { return }
+            showRewind = true
+        }
         .onChange(of: appModel.inboundRun) { _, incoming in
             guard let incoming, incoming.sessionId == sessionId else { return }
             Task { await model.attachToIncomingRun(runId: incoming.runId, messageId: incoming.messageId) }
@@ -125,13 +133,23 @@ struct ChatView: View {
         .sheet(isPresented: $showRunSettings) {
             RunSettingsSheet(model: model)
         }
+        .sheet(isPresented: $showCompact) {
+            CompactSheet(model: model)
+        }
+        .sheet(isPresented: $showRewind) {
+            RewindSheet(model: model)
+        }
     }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(model.messages) { message in
+                    TextField("Find in this chat", text: $model.transcriptQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    ForEach(model.visibleMessages) { message in
                         MessageRow(
                             message: message,
                             thinkingExpanded: model.isRunning && message.id == model.messages.last?.id)
@@ -143,7 +161,9 @@ struct ChatView: View {
                             isRunning: model.isRunning,
                             toolCount: model.toolCount,
                             lastTool: model.lastToolLabel,
-                            tools: model.tools
+                            tools: model.tools,
+                            startedAt: model.runStartedAt,
+                            contextPercent: model.context?.percent
                         )
                         .id("tools")
                     }
@@ -263,7 +283,7 @@ struct ChatView: View {
                 .disabled(model.isRunning)
                 .accessibilityLabel("Attach Mac file")
 
-                TextField("Describe the coding task…", text: $model.composerText, axis: .vertical)
+                TextField("Task, or /compact /rewind /context /stop", text: $model.composerText, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .padding(10)
@@ -375,6 +395,8 @@ struct ActivityStrip: View {
     let toolCount: Int
     let lastTool: String?
     let tools: [ToolActivity]
+    var startedAt: Date? = nil
+    var contextPercent: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -385,10 +407,12 @@ struct ActivityStrip: View {
             } else if isRunning {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
-                    Text(statusLine)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(statusLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
             } else if toolCount > 0 {
                 Text(statusLine)
@@ -422,12 +446,22 @@ struct ActivityStrip: View {
     }
 
     private var statusLine: String {
-        if let lastTool, toolCount > 1 {
-            return "\(toolCount) tools · \(lastTool)"
+        var parts: [String] = []
+        if let startedAt {
+            let secs = max(0, Int(Date().timeIntervalSince(startedAt)))
+            parts.append(secs >= 60 ? "\(secs / 60)m \(secs % 60)s" : "\(secs)s")
         }
-        if let lastTool { return lastTool }
-        if toolCount > 0 { return "\(toolCount) tools" }
-        return "Working…"
+        if let contextPercent { parts.append("ctx \(contextPercent)%") }
+        if let lastTool, toolCount > 1 {
+            parts.append("\(toolCount) tools · \(lastTool)")
+        } else if let lastTool {
+            parts.append(lastTool)
+        } else if toolCount > 0 {
+            parts.append("\(toolCount) tools")
+        } else if parts.isEmpty {
+            parts.append("Working…")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

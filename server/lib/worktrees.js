@@ -1,6 +1,6 @@
 /**
  * Isolated git worktrees for parallel agent sessions.
- * Creates a branch + worktree under <repo>/.grok-studio/worktrees/<name>
+ * Creates a branch + worktree under <repo>/.heir-studio/worktrees/<name>
  * so concurrent sessions do not collide on the main working tree.
  */
 import fs from "fs";
@@ -37,7 +37,7 @@ export function gitRoot(dir) {
 }
 
 export function worktreeBaseDir(repoRoot) {
-  return path.join(repoRoot, ".grok-studio", "worktrees");
+  return path.join(repoRoot, ".heir-studio", "worktrees");
 }
 
 export function sanitizeWorktreeName(name) {
@@ -195,17 +195,11 @@ export function removeWorktree(projectCwd, nameOrPath) {
     throw err;
   }
 
+  // `git worktree remove` detaches the checkout; the studio/* branch itself is
+  // left in place so any commits made in the worktree remain recoverable.
   runGit(repoRoot, ["worktree", "remove", "--force", wtPath], {
     timeout: 60000,
   });
-
-  // Drop the branch if it was a studio/* branch and is fully merged or orphaned
-  try {
-    const branch = currentBranch(repoRoot); // not useful — branch already gone with worktree
-    void branch;
-  } catch {
-    /* ignore */
-  }
 
   return { ok: true, path: wtPath };
 }

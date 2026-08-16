@@ -1,5 +1,5 @@
 /**
- * Grok Studio — native macOS (Electron) shell.
+ * Heir Studio — native macOS (Electron) shell.
  * Embeds the local Express server and opens a BrowserWindow against 127.0.0.1.
  */
 import {
@@ -19,9 +19,10 @@ import { startServer, stopServer } from "../server/start.js";
 import { createLogger } from "../server/lib/logger.js";
 import { safeName } from "../server/lib/template.js";
 import { registerNotificationHook } from "../server/lib/background.js";
+import { migrateAppSupport } from "../server/lib/migrate.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const log = createLogger("grok-studio-app");
+const log = createLogger("heir-studio-app");
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -41,6 +42,22 @@ function userDataDir() {
   return path.join(app.getPath("userData"), "data");
 }
 
+/**
+ * Adopt data written under the old "Grok Studio" product name so the rename
+ * does not silently start the app with an empty session list.
+ */
+function migrateLegacyUserData() {
+  const current = path.basename(app.getPath("userData"));
+  const appSupport = path.dirname(app.getPath("userData"));
+  const result = migrateAppSupport(appSupport, current, log);
+  if (result.migrated) {
+    log.info("adopted data from previous product name", {
+      from: result.from,
+      to: result.to,
+    });
+  }
+}
+
 function resolveResources() {
   const root = projectRoot();
   return {
@@ -51,8 +68,50 @@ function resolveResources() {
   };
 }
 
+/**
+ * If `npm run tunnel` (or `npm start`) is already serving on :3847, attach to
+ * that process so desktop and phone share one session store and one live hub.
+ * Starting a second server in userData would silently split the two clients.
+ */
+async function findSharedServer() {
+  const port = Number(process.env.HEIR_STUDIO_PORT || 3847);
+  const url = `http://127.0.0.1:${port}`;
+  try {
+    const res = await fetch(`${url}/api/health`, {
+      signal: AbortSignal.timeout(800),
+    });
+    if (res.ok) return { url, token: null };
+    if (res.status === 401) {
+      let token = null;
+      const tokenFile = path.join(projectRoot(), "data", "remote-access.json");
+      try {
+        token = JSON.parse(fs.readFileSync(tokenFile, "utf8")).token || null;
+      } catch {
+        token = null;
+      }
+      return { url, token };
+    }
+  } catch {
+    // nothing listening
+  }
+  return null;
+}
+
 async function ensureServer() {
   if (serverHandle) return serverHandle;
+  const existing = await findSharedServer();
+  if (existing) {
+    log.info("attaching to running studio", { url: existing.url });
+    const data = path.join(projectRoot(), "data");
+    serverHandle = {
+      url: existing.url,
+      attached: true,
+      token: existing.token,
+      cfg: { data, uploads: path.join(data, "uploads") },
+    };
+    return serverHandle;
+  }
+  migrateLegacyUserData();
   const res = resolveResources();
   serverHandle = await startServer({
     log,
@@ -263,14 +322,14 @@ async function importImages(filePaths) {
   return imported;
 }
 
-function createWindow(url) {
+async function createWindow(url, { token } = {}) {
   const iconPath = path.join(__dirname, "icon.png");
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 960,
     minHeight: 640,
-    title: "Grok Studio",
+    title: "Heir Studio",
     backgroundColor: "#0a0b0e",
     show: false,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
@@ -307,13 +366,25 @@ function createWindow(url) {
     mainWindow = null;
   });
 
+  if (token) {
+    // Tunnel mode requires a token even on loopback. EventSource cannot set
+    // Authorization, so the same token is also a cookie the renderer sends.
+    await mainWindow.webContents.session.cookies.set({
+      url,
+      name: "heir_stream",
+      value: token,
+      httpOnly: true,
+      sameSite: "lax",
+    });
+  }
+
   mainWindow.loadURL(url);
 }
 
 function showNativeNotification({ title, body }) {
   if (!Notification.isSupported()) return false;
   const n = new Notification({
-    title: title || "Grok Studio",
+    title: title || "Heir Studio",
     body: body || "",
     silent: false,
   });
@@ -349,7 +420,7 @@ function registerIpc() {
     return importImages(paths.filter((p) => typeof p === "string"));
   });
   ipcMain.handle("studio:notify", async (_e, payload) => {
-    const title = payload?.title || "Grok Studio";
+    const title = payload?.title || "Heir Studio";
     const body = payload?.body || "";
     showNativeNotification({ title, body });
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -407,7 +478,7 @@ if (!gotLock) {
 
     try {
       const handle = await ensureServer();
-      createWindow(handle.url);
+      await createWindow(handle.url, { token: handle.token });
       if (pendingOpenFiles.length) {
         await importImages(pendingOpenFiles.splice(0));
       }
@@ -419,7 +490,7 @@ if (!gotLock) {
     } catch (err) {
       log.error("startup failed", { message: err.message, stack: err.stack });
       dialog.showErrorBox(
-        "Grok Studio failed to start",
+        "Heir Studio failed to start",
         `${err.message}\n\nIs another instance stuck? Check that grok is installed (~/.grok/bin/grok).`,
       );
       app.quit();
@@ -428,7 +499,7 @@ if (!gotLock) {
     app.on("activate", async () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         const handle = await ensureServer();
-        createWindow(handle.url);
+        await createWindow(handle.url, { token: handle.token });
       }
     });
   });
@@ -439,7 +510,9 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  // fire-and-forget; electron will exit after
-  void stopServer(serverHandle);
+  // Do not kill a tunnel/npm-start we attached to.
+  if (serverHandle && !serverHandle.attached) {
+    void stopServer(serverHandle);
+  }
   serverHandle = null;
 });

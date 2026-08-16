@@ -110,12 +110,6 @@ export function listModels(options = {}) {
   return [...byId.values()];
 }
 
-export function getModel(id, options = {}) {
-  const models = listModels(options);
-  if (!id) return models[0] || BUILTIN_MODELS[0];
-  return models.find((m) => m.id === id) || null;
-}
-
 /**
  * Normalize reasoning effort. Empty → null (use model default).
  */

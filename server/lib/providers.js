@@ -27,8 +27,28 @@ export function normalizeProviderConfig(provider = {}) {
 }
 
 /**
+ * Real CLI flags for provider routing, as accepted by `grok agent` (verified
+ * against grok 0.2.117). The top-level headless command exposes no equivalent,
+ * so only the ACP transport can route deterministically — see providerToEnv.
+ */
+export function providerToAgentCliArgs(provider) {
+  const p = normalizeProviderConfig(provider);
+  const args = [];
+  const apiBase = p.xaiApiBaseUrl || p.gatewayUrl;
+  const proxyBase = p.cliChatProxyBaseUrl || p.gatewayUrl;
+  if (apiBase) args.push("--xai-api-base-url", apiBase);
+  if (proxyBase) args.push("--cli-chat-proxy-base-url", proxyBase);
+  return args;
+}
+
+/**
  * Build env vars for spawning grok with provider overrides.
  * Does not put secrets in the object — only base URL routing.
+ *
+ * NOTE: these variable names are not documented by the grok CLI, so this is
+ * best-effort and is the only lever available on the headless top-level
+ * command. Interactive (ACP) runs additionally pass the documented flags from
+ * providerToAgentCliArgs, which is the reliable path.
  */
 export function providerToEnv(provider, baseEnv = process.env) {
   const p = normalizeProviderConfig(provider);
@@ -52,20 +72,6 @@ export function providerToEnv(provider, baseEnv = process.env) {
     }
   }
   return { env, provider: p };
-}
-
-/**
- * CLI flags for provider (when env is insufficient).
- * grok supports --xai-api-base-url and --cli-chat-proxy-base-url on agent subcommand;
- * for headless top-level we use env only (documented in health).
- */
-export function providerToCliArgs(provider) {
-  const p = normalizeProviderConfig(provider);
-  const args = [];
-  // Top-level grok does not document these flags on main; keep empty for spawn args.
-  // Encoded in env via providerToEnv.
-  void p;
-  return args;
 }
 
 export function describeProvider(provider) {

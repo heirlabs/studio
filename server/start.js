@@ -1,6 +1,8 @@
 import http from "http";
+import os from "os";
 import { createApp } from "./app.js";
 import { createLogger } from "./lib/logger.js";
+import { migrateHomeConfig } from "./lib/migrate.js";
 
 /**
  * Start the local HTTP server. Returns { app, server, cfg, log, url, port }.
@@ -8,6 +10,11 @@ import { createLogger } from "./lib/logger.js";
  */
 export function startServer(overrides = {}) {
   const log = overrides.log || createLogger();
+  // Only real startups migrate the user's home config — createApp must stay
+  // side-effect free so tests never touch the developer's actual ~/.
+  if (overrides.migrateLegacy !== false) {
+    migrateHomeConfig(overrides.home || os.homedir(), log);
+  }
   const expressApp = createApp({ ...overrides, log });
   const cfg = expressApp.locals.cfg;
   const server = http.createServer(expressApp);

@@ -1,3 +1,4 @@
+import UserNotifications
 import XCTest
 
 @testable import HeirStudio
@@ -20,6 +21,102 @@ final class PushTokenTests: XCTestCase {
         XCTAssertEqual(PushRouting.stopAction, "STOP")
         XCTAssertEqual(PushRouting.openAction, "OPEN")
     }
+
+    func testStatusTextBeforePrompt() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .notDetermined,
+                hexToken: nil,
+                registeredOnMac: false,
+                lastError: nil),
+            "Not asked yet")
+    }
+
+    func testStatusTextWhenDenied() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .denied,
+                hexToken: nil,
+                registeredOnMac: false,
+                lastError: nil),
+            "Off — enable in iPhone Settings")
+    }
+
+    func testStreamAfterQuery() {
+        let path = StudioClient.queryURL(
+            path: "/api/runs/abc/stream",
+            items: [URLQueryItem(name: "after", value: "12")])
+        XCTAssertTrue(path.contains("after=12"))
+    }
+
+    func testModelsBudgetWorktreeAndHistoryDecode() throws {
+        let models = try JSONDecoder().decode(
+            ModelList.self,
+            from: Data(#"{"models":[{"id":"grok-4.5","name":"Grok 4.5"}]}"#.utf8))
+        XCTAssertEqual(models.models[0].displayName, "Grok 4.5")
+
+        let budget = try JSONDecoder().decode(
+            BudgetStatus.self,
+            from: Data(#"{"spentUsd":1.5,"maxBudgetUsd":10,"remainingUsd":8.5,"turns":3}"#.utf8))
+        XCTAssertEqual(budget.remainingUsd, 8.5)
+
+        let trees = try JSONDecoder().decode(
+            WorktreeList.self,
+            from: Data(#"{"git":true,"worktrees":[{"name":"iso","path":"/tmp/iso","branch":"studio/iso"}]}"#.utf8))
+        XCTAssertEqual(trees.worktrees[0].id, "iso")
+
+        let hist = try JSONDecoder().decode(
+            HistoryList.self,
+            from: Data(#"{"hits":[{"sessionId":"s1","text":"hello","messageId":"m1"}]}"#.utf8))
+        XCTAssertEqual(hist.hits[0].sessionId, "s1")
+    }
+
+    func testSendOptionsEncodesRunFlags() throws {
+        let opts = StudioClient.SendOptions(
+            text: "go",
+            permissionMode: "default",
+            model: "grok-4.5",
+            reasoningEffort: "high",
+            maxBudgetUsd: 2.5,
+            worktree: true)
+        let data = try JSONEncoder().encode(opts)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["model"] as? String, "grok-4.5")
+        XCTAssertEqual(json["worktree"] as? Bool, true)
+        XCTAssertEqual(json["reasoningEffort"] as? String, "high")
+    }
+
+    func testCompactResultDecodes() throws {
+        let json = """
+            {"ok":true,"grokSessionId":"g1",
+             "context":{"used":12000,"total":80000,"percent":15,"trigger":"manual"}}
+            """
+        let result = try JSONDecoder().decode(CompactResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.ok, true)
+        XCTAssertEqual(result.context?.percent, 15)
+        XCTAssertEqual(result.context?.trigger, "manual")
+    }
+
+    func testStatusTextWhenAuthorizedButNotUploaded() {
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .authorized,
+                hexToken: "ab".repeatToken(),
+                registeredOnMac: false,
+                lastError: nil),
+            "On this phone — Mac not registered yet")
+        XCTAssertEqual(
+            PushService.statusText(
+                authorization: .authorized,
+                hexToken: "ab".repeatToken(),
+                registeredOnMac: true,
+                lastError: nil),
+            "On")
+    }
+}
+
+private extension String {
+    func repeatToken() -> String { String(repeating: self, count: 32) }
 }
 
 final class PushPayloadTests: XCTestCase {

@@ -115,6 +115,7 @@ export function createSession(dataDir, { title, cwd, workflowId } = {}) {
     pinned: false,
     lastPreview: "",
     grokSessionId: null,
+    context: null,
     activeRunId: null,
     messages: [],
     runIds: [],
@@ -136,6 +137,7 @@ export function updateSession(dataDir, id, patch) {
   if (patch.workflowId != null) session.workflowId = patch.workflowId;
   if (patch.pinned != null) session.pinned = Boolean(patch.pinned);
   if (patch.grokSessionId != null) session.grokSessionId = patch.grokSessionId;
+  if (patch.context !== undefined) session.context = patch.context;
   if (patch.activeRunId !== undefined) {
     session.activeRunId = patch.activeRunId || null;
   }
@@ -325,21 +327,6 @@ export function finalizeAssistantMessage(
   msg.finishedAt = Date.now();
   if (grokSessionId) session.grokSessionId = grokSessionId;
   session.lastPreview = titleFromText(msg.text || status || "done");
-  session.updatedAt = Date.now();
-  writeSession(dataDir, session);
-  touchIndex(dataDir, session, false);
-  return session;
-}
-
-export function appendSystemNote(dataDir, id, text) {
-  const session = readSession(dataDir, id);
-  if (!session) return null;
-  session.messages.push({
-    id: randomUUID(),
-    role: "system",
-    text: String(text || ""),
-    at: Date.now(),
-  });
   session.updatedAt = Date.now();
   writeSession(dataDir, session);
   touchIndex(dataDir, session, false);

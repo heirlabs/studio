@@ -78,6 +78,10 @@ import {
   deleteCheckpoint,
 } from "./lib/checkpoints.js";
 import { getBudgetStatus } from "./lib/budget.js";
+import {
+  compactGrokSession,
+  sessionContext,
+} from "./lib/compact.js";
 import { SANDBOX_PROFILES } from "./lib/sandbox.js";
 import {
   listBackgroundJobs,
@@ -392,6 +396,7 @@ export function createApp(overrides = {}) {
         budget: true,
         sandbox: true,
         providers: true,
+        compact: true,
       },
       settingsSummary: {
         permissionMode: settings.permissionMode,
@@ -919,7 +924,9 @@ export function createApp(overrides = {}) {
   });
 
   app.get("/api/runs/:id/stream", (req, res) => {
-    const result = runs.attachStream(req.params.id, res);
+    const result = runs.attachStream(req.params.id, res, {
+      after: req.query.after,
+    });
     if (result.error) {
       if (!res.headersSent) {
         res.status(result.status || 500).json({ error: result.error });
@@ -1266,6 +1273,52 @@ export function createApp(overrides = {}) {
   app.delete("/api/sessions/:id/checkpoints/:cpId", (req, res) => {
     try {
       res.json(deleteCheckpoint(cfg.data, req.params.id, req.params.cpId));
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/sessions/:id/context", (req, res) => {
+    const session = getSession(cfg.data, req.params.id);
+    if (!session) {
+      res.status(404).json({ error: "session not found" });
+      return;
+    }
+    res.json({
+      grokSessionId: session.grokSessionId || null,
+      active: Boolean(session.activeRunId),
+      context: sessionContext(session),
+    });
+  });
+
+  app.post("/api/sessions/:id/compact", async (req, res) => {
+    try {
+      const session = getSession(cfg.data, req.params.id);
+      if (!session) {
+        res.status(404).json({ error: "session not found" });
+        return;
+      }
+      const result = await compactGrokSession({
+        dataDir: cfg.data,
+        session,
+        note: req.body?.note || req.body?.context || "",
+        grokBin: cfg.grokBin,
+        cwd: session.cwd || cfg.root,
+        env: process.env,
+      });
+      const next = getSession(cfg.data, req.params.id);
+      hub.publish({
+        type: "session",
+        event: "compacted",
+        sessionId: req.params.id,
+        context: result.context,
+        session: sessionHubPayload(next),
+      });
+      log.info("session.compact", {
+        sessionId: req.params.id,
+        percent: result.context.percent,
+      });
+      res.json(result);
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message });
     }

@@ -13,7 +13,7 @@ import { permissionModeToCliArgs, normalizePermissionMode } from "./permissions.
 import { normalizeReasoningEffort } from "./models.js";
 import { sandboxToCliArgs } from "./sandbox.js";
 import { agentToCliArgs } from "./agents.js";
-import { providerToEnv } from "./providers.js";
+import { providerToEnv, providerToAgentCliArgs } from "./providers.js";
 import { assertBudgetAllows, recordRunUsage } from "./budget.js";
 import {
   createRunBudgetTracker,
@@ -30,7 +30,9 @@ import {
   spawnRemoteCommand,
 } from "./ssh.js";
 import {
+  buildAcpArgs,
   needsInteractiveApprovals,
+  pickAllowOption,
   runAcpTurn,
 } from "./acp-client.js";
 import { resolveRunCwd } from "./worktrees.js";
@@ -245,6 +247,62 @@ export function buildGrokArgs({
 }
 
 /**
+ * Normalize a headless `--output-format streaming-json` event.
+ *
+ * Verified against grok 0.2.117, which emits:
+ *   tool_call          { toolCallId, title, kind, status, toolName, rawInput, … }
+ *   tool_call_update   { toolCallId, status, content/rawOutput }  — no title
+ *   available_commands { tools: [...], commands: [...] }   ~15KB, ~4 per run
+ *
+ * Studio's stream contract is {name, input} / {name, result}, which is also
+ * what the ACP transport produces — so both transports render identically.
+ *
+ * @param toolNames Map of toolCallId → name, carried across a run so that
+ *   updates (which omit the title) can be labelled with their call's tool.
+ * @returns the normalized event, or null when it should not be kept.
+ */
+export function normalizeStreamEvent(evt, toolNames = new Map()) {
+  if (!evt || typeof evt !== "object") return evt;
+
+  // Pure capability advertisement: large, repeated, and unused by the UI.
+  if (evt.type === "available_commands") return null;
+
+  if (evt.type === "tool_call" || evt.type === "tool") {
+    const name = evt.name || evt.title || evt.toolName || "tool";
+    if (evt.toolCallId) toolNames.set(evt.toolCallId, name);
+    return {
+      ...evt,
+      type: "tool_call",
+      name,
+      input: evt.input ?? evt.rawInput ?? evt.args ?? evt.arguments ?? null,
+    };
+  }
+
+  if (evt.type === "tool_call_update" || evt.type === "tool_result") {
+    // An in-flight update carries `content: []`; report its status rather than
+    // rendering an empty array as the result payload.
+    const content =
+      Array.isArray(evt.content) && evt.content.length === 0
+        ? null
+        : evt.content;
+    return {
+      ...evt,
+      type: "tool_result",
+      name:
+        evt.name ||
+        evt.title ||
+        evt.toolName ||
+        toolNames.get(evt.toolCallId) ||
+        "tool",
+      result: evt.result ?? evt.rawOutput ?? content ?? evt.status ?? null,
+      status: evt.status || "completed",
+    };
+  }
+
+  return evt;
+}
+
+/**
  * Apply mid-run budget + turn accounting to a streaming event.
  * Returns { kill: boolean, reason?: string, evt }.
  */
@@ -274,10 +332,20 @@ export function createRunManager(cfg, log) {
   }
 
   function writeMeta(runDir, meta) {
-    fs.writeFileSync(
-      path.join(runDir, "meta.json"),
-      JSON.stringify(meta, null, 2),
-    );
+    // Called from child-process close handlers, where a throw is an uncaught
+    // exception that takes the server down. The run directory can legitimately
+    // vanish underneath us — the documented rollback is to delete data/runs —
+    // so failing to persist must degrade, not crash.
+    try {
+      fs.writeFileSync(
+        path.join(runDir, "meta.json"),
+        JSON.stringify(meta, null, 2),
+      );
+      return true;
+    } catch (e) {
+      log.error("run.meta_write_failed", { runDir, message: e.message });
+      return false;
+    }
   }
 
   function listRuns(limit = 50) {
@@ -508,7 +576,7 @@ export function createRunManager(cfg, log) {
 
     const localArgs = buildGrokArgs({
       promptFile,
-      workDir: sshConn ? workDir : workDir,
+      workDir,
       model,
       permissionMode: resolvedMode,
       yolo,
@@ -580,6 +648,8 @@ export function createRunManager(cfg, log) {
       acpHandle: null,
       clients: new Set(),
       status: "running",
+      finalized: false,
+      spawnError: null,
       events: [],
       textAcc: "",
       thoughtAcc: "",
@@ -592,16 +662,19 @@ export function createRunManager(cfg, log) {
       background: Boolean(background),
       budget,
       pendingPermissions: new Map(),
+      /** toolCallId → tool name, so updates can be labelled */
+      toolNames: new Map(),
     };
     active.set(id, state);
 
     const broadcast = (evt) => {
-      state.events.push(evt);
-      if (!logStream.destroyed) {
-        logStream.write(JSON.stringify(evt) + "\n");
+      const stamped = { ...evt, seq: state.events.length + 1 };
+      state.events.push(stamped);
+      if (!logStream.destroyed && !logStream.writableEnded) {
+        logStream.write(JSON.stringify(stamped) + "\n");
       }
-      if (typeof onEvent === "function") onEvent(evt);
-      const payload = `data: ${JSON.stringify(evt)}\n\n`;
+      if (typeof onEvent === "function") onEvent(stamped);
+      const payload = `data: ${JSON.stringify(stamped)}\n\n`;
       for (const res of [...state.clients]) {
         if (res.writableEnded || res.destroyed) {
           state.clients.delete(res);
@@ -631,11 +704,13 @@ export function createRunManager(cfg, log) {
         state.proc.kill("SIGTERM");
         setTimeout(() => {
           if (state.proc && !state.proc.killed) state.proc.kill("SIGKILL");
-        }, 2000);
+        }, 2000).unref();
       }
     };
 
-    const handleStreamEvent = (evt) => {
+    const handleStreamEvent = (raw) => {
+      const evt = normalizeStreamEvent(raw, state.toolNames);
+      if (evt === null) return { kill: false, evt: null };
       if (evt.type === "text" && evt.data) state.textAcc += evt.data;
       if (evt.type === "thought" && evt.data) state.thoughtAcc += evt.data;
       if (evt.type === "tool_call" || evt.type === "tool") {
@@ -645,8 +720,24 @@ export function createRunManager(cfg, log) {
       if (evt.type === "end" && evt.sessionId) {
         meta.sessionId = evt.sessionId;
       }
+      if (evt.type === "studio" && evt.event === "acp_session" && evt.sessionId) {
+        meta.sessionId = evt.sessionId;
+      }
       if (evt.type === "studio" && evt.event === "permission_request") {
         state.pendingPermissions.set(String(evt.id), evt);
+      }
+      if (
+        raw?.type === "auto_compact" ||
+        raw?.subtype === "compact_boundary" ||
+        (raw?.type === "system" && raw?.subtype === "compact_boundary")
+      ) {
+        broadcast({
+          type: "studio",
+          event: "compact",
+          trigger: "auto",
+          tokensBefore: raw.preTokens || raw.tokensBefore || null,
+          tokensAfter: raw.tokensAfter || null,
+        });
       }
       const budgetCheck = processRunEventForBudget(budget, evt);
       broadcast(evt);
@@ -694,7 +785,13 @@ export function createRunManager(cfg, log) {
       NO_COLOR: "1",
     });
 
+    // A spawn failure emits both "error" and "close"; ACP resolves and may also
+    // be cancelled. Finalize exactly once or we write to a closed log stream and
+    // double-charge the budget ledger.
     const finalizeRun = (code, signal) => {
+      if (state.finalized) return;
+      state.finalized = true;
+
       const seenSources = new Set();
       const sessionCwd = sshConn ? cfg.root : meta.cwd || cfg.root;
       const harvested = [
@@ -719,6 +816,8 @@ export function createRunManager(cfg, log) {
 
       if (meta.status === "budget_exceeded") {
         // keep
+      } else if (state.spawnError) {
+        meta.status = "error";
       } else if (signal === "SIGTERM" || signal === "SIGKILL") {
         meta.status = "cancelled";
       } else {
@@ -793,7 +892,13 @@ export function createRunManager(cfg, log) {
 
     if (useAcp) {
       meta.transport = "acp";
-      meta.args = ["agent", "stdio", ...(model ? ["-m", model] : [])];
+      // record what is actually spawned, not an approximation of it
+      meta.args = buildAcpArgs({
+        alwaysApprove:
+          resolvedMode === "bypassPermissions" || resolvedMode == null,
+        model,
+        extraArgs: providerToAgentCliArgs(provider),
+      });
       writeMeta(runDir, meta);
       broadcast({
         type: "studio",
@@ -808,8 +913,11 @@ export function createRunManager(cfg, log) {
         env: spawnEnv,
         model: model || undefined,
         permissionMode: resolvedMode || "default",
+        sandbox,
+        provider,
         prompt: finalPrompt,
         attachments: staged.map((p) => ({ path: p, name: path.basename(p) })),
+        resumeSessionId: resumeGrokSessionId || undefined,
         onEvent: (evt) => {
           handleStreamEvent(evt);
         },
@@ -850,7 +958,7 @@ export function createRunManager(cfg, log) {
     let proc;
     if (sshConn) {
       // Upload prompt to remote tmp and run grok there
-      const remotePrompt = `/tmp/grok-studio-prompt-${id}.txt`;
+      const remotePrompt = `/tmp/heir-studio-prompt-${id}.txt`;
       try {
         uploadFileViaScp(sshConn, promptFile, remotePrompt);
       } catch (e) {
@@ -860,8 +968,9 @@ export function createRunManager(cfg, log) {
         meta.finishedAt = Date.now();
         writeMeta(runDir, meta);
         state.status = "error";
+        state.finalized = true;
         broadcast({ type: "error", message: meta.error });
-        if (!logStream.destroyed) logStream.end();
+        if (!logStream.writableEnded) logStream.end();
         active.delete(id);
         if (background) {
           finishBackgroundJob(cfg.data, id, {
@@ -931,19 +1040,12 @@ export function createRunManager(cfg, log) {
 
     proc.on("error", (err) => {
       log.error("run.spawn_error", { id, message: err.message });
-      broadcast({ type: "error", message: err.message });
-      meta.status = "error";
+      state.spawnError = err;
       meta.error = err.message;
-      meta.finishedAt = Date.now();
-      writeMeta(runDir, meta);
-      state.status = "error";
-      if (state.background) {
-        finishBackgroundJob(cfg.data, id, {
-          status: "error",
-          summary: err.message,
-        });
-      }
-      finishClients(state, null);
+      broadcast({ type: "error", message: err.message });
+      // finalizeRun does the meta write, ledger entry, background job and client
+      // teardown; it is idempotent, so the trailing "close" event is a no-op.
+      finalizeRun(null, null);
     });
 
     proc.on("close", (code, signal) => {
@@ -967,35 +1069,40 @@ export function createRunManager(cfg, log) {
         res.end();
       }
       state.clients.clear();
-      state.logStream.end();
+      if (!state.logStream.writableEnded) state.logStream.end();
       active.delete(state.id);
     };
-    if (delayMs && delayMs > 0) setTimeout(close, delayMs);
+    if (delayMs && delayMs > 0) setTimeout(close, delayMs).unref();
     else close();
   }
 
-  function attachStream(id, res) {
+  function attachStream(id, res, { after = 0 } = {}) {
     if (!isUuid(id)) return { error: "invalid run id", status: 400 };
+    const afterSeq = Math.max(0, Number(after) || 0);
     const state = active.get(id);
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
 
+    const replay = (events) => {
+      events.forEach((evt, i) => {
+        const seq = evt.seq || i + 1;
+        if (seq <= afterSeq) return;
+        res.write(`data: ${JSON.stringify({ ...evt, seq })}\n\n`);
+      });
+    };
+
     if (state) {
-      for (const evt of state.events) {
-        res.write(`data: ${JSON.stringify(evt)}\n\n`);
-      }
+      replay(state.events);
       state.clients.add(res);
       res.on("close", () => state.clients.delete(res));
-      return { ok: true, live: true };
+      return { ok: true, live: true, after: afterSeq };
     }
 
     const detail = getRun(id);
     if (!detail) return { error: "not found", status: 404 };
-    for (const evt of detail.events) {
-      res.write(`data: ${JSON.stringify(evt)}\n\n`);
-    }
+    replay(detail.events);
     res.write(
       `data: ${JSON.stringify({
         type: "studio",
@@ -1034,7 +1141,7 @@ export function createRunManager(cfg, log) {
         if (state.proc && !state.proc.killed) {
           state.proc.kill("SIGKILL");
         }
-      }, 3000);
+      }, 3000).unref();
     }
     return { ok: true };
   }
@@ -1054,45 +1161,28 @@ export function createRunManager(cfg, log) {
       err.status = 404;
       throw err;
     }
-    const optionId =
-      decision?.optionId ||
-      decision?.option ||
-      (decision?.allow
-        ? (state.pendingPermissions.get(String(permissionId))?.options || []).find(
-            (o) =>
-              o.kind === "allow_once" ||
-              o.kind === "allow_always" ||
-              /allow/i.test(o.name || o.optionId || ""),
-          )?.optionId
-        : null);
     if (decision?.deny || decision?.cancelled) {
       state.acpHandle.respondPermission(permissionId, {
         outcome: "cancelled",
         cancelled: true,
       });
     } else {
+      const options =
+        state.pendingPermissions.get(String(permissionId))?.options || [];
+      const optionId =
+        decision?.optionId ||
+        decision?.option ||
+        pickAllowOption(options)?.optionId ||
+        options[0]?.optionId;
       if (!optionId) {
-        // Prefer first option that looks like allow
-        const opts =
-          state.pendingPermissions.get(String(permissionId))?.options || [];
-        const allowOpt =
-          opts.find((o) => o.kind === "allow_once" || o.kind === "allow_always") ||
-          opts[0];
-        if (!allowOpt?.optionId) {
-          const err = new Error("optionId required to approve");
-          err.status = 400;
-          throw err;
-        }
-        state.acpHandle.respondPermission(permissionId, {
-          outcome: "selected",
-          optionId: allowOpt.optionId,
-        });
-      } else {
-        state.acpHandle.respondPermission(permissionId, {
-          outcome: "selected",
-          optionId,
-        });
+        const err = new Error("optionId required to approve");
+        err.status = 400;
+        throw err;
       }
+      state.acpHandle.respondPermission(permissionId, {
+        outcome: "selected",
+        optionId,
+      });
     }
     state.pendingPermissions.delete(String(permissionId));
     const payload = {
@@ -1100,13 +1190,16 @@ export function createRunManager(cfg, log) {
       event: "permission_resolved",
       id: permissionId,
       decision,
+      seq: state.events.length + 1,
     };
     state.events.push(payload);
-    if (!state.logStream.destroyed) {
+    if (!state.logStream.destroyed && !state.logStream.writableEnded) {
       state.logStream.write(JSON.stringify(payload) + "\n");
     }
     for (const res of state.clients) {
-      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      }
     }
     return { ok: true };
   }

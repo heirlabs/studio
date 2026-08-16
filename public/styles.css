@@ -135,10 +135,15 @@ body.native .composer {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  background: linear-gradient(145deg, #2a3550, #12151e);
-  border: 1px solid var(--border-hot);
-  font-size: 14px;
-  color: var(--accent);
+  background: #000;
+  border: 1px solid #1a1a1a;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.mark img {
+  width: 28px;
+  height: 28px;
+  display: block;
 }
 
 .sidebar-title {
@@ -1240,4 +1245,10 @@ button {
   font-size: 0.72rem;
   color: var(--muted);
   margin-top: 8px;
+}
+
+/* Selected permission mode is overridden by the CLI's own config */
+.mode-chip.perm-overridden {
+  border-color: #b4791f;
+  color: #f0b849;
 }

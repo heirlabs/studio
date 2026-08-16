@@ -4,6 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { execFileSync } from "child_process";
 import { createApp } from "../../server/app.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,6 +46,42 @@ async function waitForRun(base, id, timeoutMs = 8000) {
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`run ${id} did not finish in ${timeoutMs}ms`);
+}
+
+/** Poll a run's event log until `match` finds an event. */
+async function waitForEvent(base, id, match, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { body } = await json(base, `/api/runs/${id}`);
+    const hit = (body.events || []).find(match);
+    if (hit) return hit;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`run ${id} produced no matching event in ${timeoutMs}ms`);
+}
+
+function runEventText(detail) {
+  return (detail.events || detail.body?.events || [])
+    .filter((e) => e.type === "text")
+    .map((e) => e.data)
+    .join("");
+}
+
+/** Start an ACP run and return { id, meta }. */
+async function startAcpRun(base, overrides = {}) {
+  const { res, body } = await json(base, "/api/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      workflowId: "code-agent",
+      prompt: "need approval",
+      interactive: true,
+      ...overrides,
+    }),
+  });
+  assert.equal(res.status, 201, `run rejected: ${JSON.stringify(body)}`);
+  assert.equal(body.meta.transport, "acp");
+  return body;
 }
 
 describe("HTTP API integration", () => {
@@ -106,7 +143,7 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     const res = await fetch(`${ctx.base}/`);
     assert.equal(res.status, 200);
     const html = await res.text();
-    assert.match(html, /Grok Studio/);
+    assert.match(html, /Heir Studio/);
   });
 
   it("GET /api/health reports fake grok version", async () => {
@@ -527,7 +564,179 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.equal(body.features.permissionModes, true);
     assert.equal(body.features.keybindings, true);
     assert.equal(body.features.checkpoints, true);
+    assert.equal(body.features.compact, true);
     assert.ok(body.permissionModes.includes("plan"));
+  });
+
+  it("compact requires a grok session and refuses a live run", async () => {
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+    const empty = await json(ctx.base, `/api/sessions/${sid}/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "keep the auth" }),
+    });
+    assert.equal(empty.res.status, 409);
+
+    process.env.FAKE_GROK_MODE = "pong";
+    const msg = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "pong",
+        workflowId: "code-agent",
+        cwd: ROOT,
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    assert.equal(msg.res.status, 201);
+    await waitForRun(ctx.base, msg.body.run.id);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const compacted = await json(ctx.base, `/api/sessions/${sid}/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "keep the auth" }),
+    });
+    assert.equal(compacted.res.status, 200, JSON.stringify(compacted.body));
+    assert.equal(compacted.body.ok, true);
+    assert.equal(compacted.body.context.tokensBefore, 80000);
+    assert.equal(compacted.body.context.tokensAfter, 12000);
+    assert.equal(compacted.body.context.percent, 15);
+
+    const ctxBody = await json(ctx.base, `/api/sessions/${sid}/context`);
+    assert.equal(ctxBody.res.status, 200);
+    assert.equal(ctxBody.body.context.percent, 15);
+    assert.ok(ctxBody.body.grokSessionId);
+  });
+
+  it("compact 409s while a session run is still live", async () => {
+    process.env.FAKE_GROK_MODE = "slow";
+    process.env.FAKE_GROK_SLEEP_MS = "1500";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+    process.env.FAKE_GROK_MODE = "pong";
+    const primed = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "prime",
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    await waitForRun(ctx.base, primed.body.run.id);
+    process.env.FAKE_GROK_MODE = "slow";
+    const live = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "slow",
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    const blocked = await json(ctx.base, `/api/sessions/${sid}/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "nope" }),
+    });
+    assert.equal(blocked.res.status, 409);
+    await json(ctx.base, `/api/runs/${live.body.run.id}/cancel`, { method: "POST" });
+    process.env.FAKE_GROK_MODE = "pong";
+    delete process.env.FAKE_GROK_SLEEP_MS;
+  });
+
+  it("second interactive turn resumes the stored ACP session", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+
+    async function turn(text) {
+      const msg = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          cwd: ROOT,
+          permissionMode: "default",
+          interactive: true,
+        }),
+      });
+      assert.equal(msg.res.status, 201);
+      const perm = await waitForEvent(
+        ctx.base,
+        msg.body.run.id,
+        (e) => e.type === "studio" && e.event === "permission_request",
+      );
+      await json(ctx.base, `/api/runs/${msg.body.run.id}/permissions/${perm.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow: true, optionId: "allow-once" }),
+      });
+      return waitForRun(ctx.base, msg.body.run.id, 15000);
+    }
+
+    const first = await turn("first turn");
+    const acp1 = (first.events || []).find(
+      (e) => e.type === "studio" && e.event === "acp_session",
+    );
+    assert.ok(acp1, "first turn must emit acp_session");
+    assert.equal(acp1.resumed, false);
+    await new Promise((r) => setTimeout(r, 80));
+    const session = await json(ctx.base, `/api/sessions/${sid}`);
+    assert.equal(session.body.grokSessionId, acp1.sessionId);
+
+    const second = await turn("second turn");
+    const acp2 = (second.events || []).find(
+      (e) => e.type === "studio" && e.event === "acp_session",
+    );
+    assert.ok(acp2);
+    assert.equal(acp2.resumed, true);
+    assert.equal(acp2.sessionId, acp1.sessionId);
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("stream replay honors after= seq", async () => {
+    process.env.FAKE_GROK_MODE = "pong";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const msg = await json(ctx.base, `/api/sessions/${created.body.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "pong",
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    const done = await waitForRun(ctx.base, msg.body.run.id);
+    assert.ok((done.events || []).some((e) => e.seq === 1));
+    const res = await fetch(
+      `${ctx.base}/api/runs/${msg.body.run.id}/stream?after=1`,
+    );
+    const text = await res.text();
+    assert.ok(text.includes("finished"), text.slice(0, 400));
+    assert.ok(
+      !text.includes('"event":"started"'),
+      "seq 1 (started) must be skipped when after=1",
+    );
   });
 
   it("permissions cycle API", async () => {
@@ -959,47 +1168,58 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.equal(res.status, 201);
     const done = await waitForRun(ctx.base, body.id);
     assert.equal(done.meta.status, "completed");
-    const detail = await json(ctx.base, `/api/runs/${body.id}`);
-    const types = detail.body.events.map((e) => e.type);
-    assert.ok(types.includes("tool_call"));
-    assert.ok(types.includes("tool_result"));
+    const events = done.events;
+
+    // The fixture emits grok's real wire shape (title/toolName/rawInput and
+    // tool_call_update). Studio must normalize it to the {name,input}/{name,
+    // result} contract the UI renders, or every tool card reads "tool".
+    const call = events.find((e) => e.type === "tool_call");
+    assert.ok(call, "expected a normalized tool_call");
+    assert.equal(call.name, "read_file");
+    assert.deepEqual(call.input, { target_file: "src/app.js", limit: 50 });
+
+    // Real updates omit the title, so the name must be correlated back to the
+    // originating call by toolCallId — otherwise every result reads "tool".
+    const results = events.filter((e) => e.type === "tool_result");
+    assert.equal(results.length, 2);
+    assert.ok(
+      results.every((r) => r.name === "read_file"),
+      `results should be labelled from their call: ${JSON.stringify(results.map((r) => r.name))}`,
+    );
+    assert.equal(results[0].status, "in_progress");
+    assert.equal(results[0].result, "in_progress", "empty content → status");
+    assert.equal(results[1].result, "export function app() { return 1; }");
+    assert.equal(results[1].status, "completed");
+
+    // available_commands is ~15KB of capability advertisement, several per
+    // run — it must never reach the event log or the SSE stream.
+    assert.ok(
+      !events.some((e) => e.type === "available_commands"),
+      "available_commands should be dropped",
+    );
+
+    // one tool_call === one turn (the update must not double-count)
+    assert.equal(done.meta.turnCount, 1);
     process.env.FAKE_GROK_MODE = "pong";
   });
 
-  it("ACP interactive run requests permission and accepts allow", async () => {
+  it("ACP interactive run requests permission and runs the tool on allow", async () => {
     process.env.FAKE_GROK_MODE = "acp-permission";
-    const { res, body } = await json(ctx.base, "/api/runs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        workflowId: "code-agent",
-        prompt: "need approval",
-        cwd: ROOT,
-        permissionMode: "default",
-        interactive: true,
-      }),
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "default",
     });
-    assert.equal(res.status, 201);
-    assert.equal(body.meta.transport, "acp");
 
-    // Wait for permission_request event
-    let permId = null;
-    for (let i = 0; i < 40; i++) {
-      const detail = await json(ctx.base, `/api/runs/${body.id}`);
-      const perm = detail.body.events.find(
-        (e) => e.type === "studio" && e.event === "permission_request",
-      );
-      if (perm) {
-        permId = perm.id;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    assert.ok(permId, "expected permission_request event");
+    const perm = await waitForEvent(
+      ctx.base,
+      run.id,
+      (e) => e.type === "studio" && e.event === "permission_request",
+    );
+    assert.equal(perm.toolCall.title, "run_terminal_command");
 
     const allow = await json(
       ctx.base,
-      `/api/runs/${body.id}/permissions/${permId}`,
+      `/api/runs/${run.id}/permissions/${perm.id}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1008,16 +1228,148 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     );
     assert.equal(allow.res.status, 200);
 
-    const done = await waitForRun(ctx.base, body.id, 15000);
-    assert.ok(
-      ["completed", "failed", "cancelled"].includes(done.meta.status),
+    const done = await waitForRun(ctx.base, run.id, 15000);
+    assert.equal(done.meta.status, "completed");
+    // The agent only emits ALLOWED_PONG after it actually receives "selected"
+    assert.match(runEventText(done), /ALLOWED_PONG/);
+    assert.doesNotMatch(runEventText(done), /DENIED_PONG/);
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("ACP deny answers the agent instead of hanging the turn", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "default",
+      prompt: "deny me",
+    });
+
+    const perm = await waitForEvent(
+      ctx.base,
+      run.id,
+      (e) => e.type === "studio" && e.event === "permission_request",
     );
-    const detail = await json(ctx.base, `/api/runs/${body.id}`);
-    const texts = detail.body.events
-      .filter((e) => e.type === "text")
-      .map((e) => e.data)
-      .join("");
-    assert.match(texts, /ALLOWED_PONG|ACP_PONG|DENIED/);
+    const deny = await json(
+      ctx.base,
+      `/api/runs/${run.id}/permissions/${perm.id}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deny: true, cancelled: true }),
+      },
+    );
+    assert.equal(deny.res.status, 200);
+
+    // The fixture's 12s permission timeout is longer than this wait, so
+    // finishing quickly proves the denial actually reached the agent.
+    const done = await waitForRun(ctx.base, run.id, 8000);
+    assert.equal(done.meta.status, "completed");
+    assert.match(runEventText(done), /DENIED_PONG/);
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("acceptEdits auto-approves an edit without prompting the user", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    process.env.FAKE_GROK_ACP_TOOL_KIND = "edit";
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "acceptEdits",
+      prompt: "edit a file",
+    });
+
+    const auto = await waitForEvent(
+      ctx.base,
+      run.id,
+      (e) => e.type === "studio" && e.event === "permission_auto",
+    );
+    assert.equal(auto.decision, "allow");
+    assert.match(auto.reason, /acceptEdits/);
+
+    const done = await waitForRun(ctx.base, run.id, 15000);
+    assert.equal(done.meta.status, "completed");
+    assert.match(runEventText(done), /ALLOWED_PONG/);
+    // the user was never asked
+    assert.ok(
+      !done.events.some(
+        (e) => e.type === "studio" && e.event === "permission_request",
+      ),
+      "acceptEdits should not surface an edit permission prompt",
+    );
+    delete process.env.FAKE_GROK_ACP_TOOL_KIND;
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("acceptEdits still prompts for shell commands", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    process.env.FAKE_GROK_ACP_TOOL_KIND = "execute";
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "acceptEdits",
+      prompt: "run a command",
+    });
+
+    const perm = await waitForEvent(
+      ctx.base,
+      run.id,
+      (e) => e.type === "studio" && e.event === "permission_request",
+    );
+    assert.equal(perm.toolCall.kind, "execute");
+
+    await json(ctx.base, `/api/runs/${run.id}/permissions/${perm.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deny: true, cancelled: true }),
+    });
+    await waitForRun(ctx.base, run.id, 8000);
+    delete process.env.FAKE_GROK_ACP_TOOL_KIND;
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("read-only sandbox auto-denies an edit tool call", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    process.env.FAKE_GROK_ACP_TOOL_KIND = "edit";
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "acceptEdits",
+      sandbox: "read-only",
+      prompt: "edit under read-only",
+    });
+
+    const auto = await waitForEvent(
+      ctx.base,
+      run.id,
+      (e) => e.type === "studio" && e.event === "permission_auto",
+    );
+    assert.equal(auto.decision, "deny");
+    assert.match(auto.reason, /read-only sandbox/i);
+
+    const done = await waitForRun(ctx.base, run.id, 15000);
+    assert.match(runEventText(done), /DENIED_PONG/);
+    delete process.env.FAKE_GROK_ACP_TOOL_KIND;
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
+  it("a failed ACP turn finalizes the run and leaves the server alive", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    process.env.FAKE_GROK_ACP_FAIL = "1";
+    const run = await startAcpRun(ctx.base, {
+      cwd: ROOT,
+      permissionMode: "default",
+      prompt: "fail the turn",
+    });
+
+    const done = await waitForRun(ctx.base, run.id, 15000);
+    assert.equal(done.meta.status, "failed");
+    assert.ok(
+      done.events.some(
+        (e) => e.type === "error" && /fake acp turn failure/.test(e.message),
+      ),
+      "expected the ACP error to reach the event log",
+    );
+    // Before the fix this rejection killed the process — prove it is still up.
+    const health = await json(ctx.base, "/api/health");
+    assert.equal(health.res.status, 200);
+    delete process.env.FAKE_GROK_ACP_FAIL;
     process.env.FAKE_GROK_MODE = "pong";
   });
 
@@ -1077,5 +1429,349 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.equal(res.status, 200);
     assert.ok(typeof body.git === "boolean");
     assert.ok(Array.isArray(body.worktrees));
+  });
+
+  it("upload delete rejects path traversal", async () => {
+    const canary = path.join(ctx.data, "outputs", "do-not-delete.png");
+    fs.writeFileSync(canary, TINY_PNG);
+    const { res } = await json(
+      ctx.base,
+      `/api/uploads/${encodeURIComponent("../outputs/do-not-delete.png")}`,
+      { method: "DELETE" },
+    );
+    // basename() collapses the traversal, so the request is a harmless no-op
+    assert.equal(res.status, 200);
+    assert.ok(fs.existsSync(canary), "traversal must not delete outside uploads");
+    fs.unlinkSync(canary);
+  });
+
+  it("maxTurns reaches the grok argv", async () => {
+    const { res, body } = await json(ctx.base, "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "code-agent",
+        prompt: "bounded",
+        cwd: ROOT,
+        maxTurns: 7,
+        interactive: false,
+        permissionMode: "bypassPermissions",
+      }),
+    });
+    assert.equal(res.status, 201);
+    const idx = body.meta.args.indexOf("--max-turns");
+    assert.ok(idx >= 0, "expected --max-turns in argv");
+    assert.equal(body.meta.args[idx + 1], "7");
+    await waitForRun(ctx.base, body.id);
+  });
+
+  it("rejects a non-integer maxTurns", async () => {
+    const { res, body } = await json(ctx.base, "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: "code-agent",
+        prompt: "bad turns",
+        cwd: ROOT,
+        maxTurns: 2.5,
+        interactive: false,
+        permissionMode: "bypassPermissions",
+      }),
+    });
+    assert.equal(res.status, 400);
+    assert.match(body.error, /maxTurns/);
+  });
+
+  it("transcript markdown carries roles and thinking", async () => {
+    const session = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT }),
+    });
+    const posted = await json(
+      ctx.base,
+      `/api/sessions/${session.body.id}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: "markdown please",
+          cwd: ROOT,
+          interactive: false,
+          permissionMode: "bypassPermissions",
+        }),
+      },
+    );
+    await waitForRun(ctx.base, posted.body.run.id);
+
+    const res = await fetch(
+      `${ctx.base}/api/sessions/${session.body.id}/transcript?format=markdown`,
+    );
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") || "", /markdown/);
+    const md = await res.text();
+    assert.match(md, /## user/);
+    assert.match(md, /markdown please/);
+    assert.match(md, /## assistant/);
+    assert.match(md, /PONG/);
+    assert.match(md, /<details><summary>Thinking<\/summary>/);
+  });
+
+  it("settings layers: local overrides project overrides user", async () => {
+    const projectCwd = fs.mkdtempSync(path.join(os.tmpdir(), "gs-layers-"));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "gs-home-"));
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), "gs-ldata-"));
+
+    fs.mkdirSync(path.join(home, ".heir-studio"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".heir-studio", "settings.json"),
+      JSON.stringify({ model: "from-user", maxTurns: 11, sandbox: "full" }),
+    );
+    fs.mkdirSync(path.join(projectCwd, ".heir-studio"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectCwd, ".heir-studio", "settings.json"),
+      JSON.stringify({ model: "from-project", maxTurns: 22 }),
+    );
+    fs.writeFileSync(
+      path.join(data, "settings.local.json"),
+      JSON.stringify({ model: "from-local" }),
+    );
+
+    const { loadSettings } = await import("../../server/lib/settings.js");
+    const { settings } = loadSettings({ dataDir: data, projectCwd, home });
+    assert.equal(settings.model, "from-local", "local wins");
+    assert.equal(settings.maxTurns, 22, "project beats user");
+    assert.equal(settings.sandbox, "full", "user survives where unshadowed");
+
+    for (const d of [projectCwd, home, data]) {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("run failure and isolation paths", () => {
+  let tmp;
+  let repo;
+
+  before(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gs-fail-"));
+    // realpath: git reports /private/var/... on macOS while mkdtemp hands back
+    // the /var symlink, and run cwds are compared against the repo root
+    repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gs-repo-")));
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "t@t.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: repo });
+    fs.writeFileSync(path.join(repo, "README.md"), "# t\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd: repo });
+  });
+
+  after(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  function appWith(overrides) {
+    const data = fs.mkdtempSync(path.join(tmp, "data-"));
+    fs.mkdirSync(path.join(data, "uploads"), { recursive: true });
+    fs.mkdirSync(path.join(data, "outputs"), { recursive: true });
+    fs.mkdirSync(path.join(data, "runs"), { recursive: true });
+    const app = createApp({
+      root: ROOT,
+      data,
+      catalogPath: path.join(ROOT, "workflows/catalog.json"),
+      publicDir: path.join(ROOT, "public"),
+      sessionsRoot: path.join(data, "sessions"),
+      userWorkflowsDir: path.join(data, "user-wf"),
+      studioWorkflowsDir: path.join(data, "studio-wf"),
+      settingsHome: data,
+      log: silentLog(),
+      ...overrides,
+    });
+    return { app, data };
+  }
+
+  it("a grok binary that cannot spawn fails the run exactly once", async () => {
+    const { app, data } = appWith({ grokBin: "/nonexistent/grok-xyz" });
+    const local = await listen(app);
+    try {
+      const session = await json(local.base, "/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: repo }),
+      });
+      const posted = await json(
+        local.base,
+        `/api/sessions/${session.body.id}/messages`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: "will not spawn",
+            cwd: repo,
+            interactive: false,
+            permissionMode: "bypassPermissions",
+          }),
+        },
+      );
+      assert.equal(posted.res.status, 201);
+
+      const done = await waitForRun(local.base, posted.body.run.id);
+      assert.equal(done.meta.status, "error");
+      assert.match(done.meta.error, /ENOENT/);
+
+      // The server survived the spawn error (it used to die on a
+      // write-after-end while finalizing twice).
+      const health = await json(local.base, "/api/health");
+      assert.equal(health.res.status, 200);
+
+      // Finalized once: one ledger entry, one run counted.
+      const ledger = JSON.parse(
+        fs.readFileSync(path.join(data, "budget-ledger.json"), "utf8"),
+      );
+      assert.equal(Object.keys(ledger.runs).length, 1);
+      assert.equal(Object.values(ledger.days)[0].runs, 1);
+
+      // And the chat message reflects the failure.
+      const got = await json(local.base, `/api/sessions/${session.body.id}`);
+      const asst = got.body.messages.filter((m) => m.role === "assistant");
+      assert.equal(asst[asst.length - 1].status, "error");
+    } finally {
+      await new Promise((r) => local.server.close(r));
+    }
+  });
+
+  it("worktree:true runs inside an isolated checkout, not the project", async () => {
+    const wrapper = path.join(tmp, "wrap.sh");
+    fs.writeFileSync(
+      wrapper,
+      `#!/bin/sh\nexec "${process.execPath}" "${FAKE_GROK}" "$@"\n`,
+    );
+    fs.chmodSync(wrapper, 0o755);
+
+    const { app } = appWith({ grokBin: wrapper });
+    const local = await listen(app);
+    try {
+      const { res, body } = await json(local.base, "/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflowId: "code-agent",
+          prompt: "isolated",
+          cwd: repo,
+          worktree: true,
+          worktreeName: "iso-run",
+          interactive: false,
+          permissionMode: "bypassPermissions",
+        }),
+      });
+      assert.equal(res.status, 201);
+      assert.equal(body.meta.worktree.name, "iso-run");
+      assert.match(body.meta.worktree.branch, /^studio\//);
+      assert.notEqual(body.meta.cwd, repo);
+      assert.ok(
+        body.meta.cwd.startsWith(path.join(repo, ".heir-studio", "worktrees")),
+        `run cwd ${body.meta.cwd} should be under the worktree root`,
+      );
+      assert.ok(fs.existsSync(path.join(body.meta.cwd, "README.md")));
+      // --cwd handed to the CLI is the worktree, not the project root
+      const cwdIdx = body.meta.args.indexOf("--cwd");
+      assert.equal(body.meta.args[cwdIdx + 1], body.meta.cwd);
+
+      const done = await waitForRun(local.base, body.id);
+      assert.equal(done.meta.status, "completed");
+
+      const listed = await json(
+        local.base,
+        `/api/worktrees?cwd=${encodeURIComponent(repo)}`,
+      );
+      assert.ok(listed.body.worktrees.some((w) => w.name === "iso-run"));
+
+      const removed = await json(
+        local.base,
+        `/api/worktrees/iso-run?cwd=${encodeURIComponent(repo)}`,
+        { method: "DELETE" },
+      );
+      assert.equal(removed.res.status, 200);
+      assert.equal(fs.existsSync(body.meta.cwd), false);
+    } finally {
+      await new Promise((r) => local.server.close(r));
+    }
+  });
+
+  it("worktree:true on a non-git project is rejected, not silently ignored", async () => {
+    const plain = fs.mkdtempSync(path.join(tmp, "plain-"));
+    const { app } = appWith({ grokBin: "/bin/echo" });
+    const local = await listen(app);
+    try {
+      const { res, body } = await json(local.base, "/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflowId: "code-agent",
+          prompt: "no git here",
+          cwd: plain,
+          worktree: true,
+          interactive: false,
+          permissionMode: "bypassPermissions",
+        }),
+      });
+      assert.equal(res.status, 400);
+      assert.match(body.error, /not a git repository/i);
+    } finally {
+      await new Promise((r) => local.server.close(r));
+    }
+  });
+});
+
+describe("CLI approval-policy reporting", () => {
+  async function healthWithHome(toml) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "gs-clih-"));
+    const data = path.join(home, "data");
+    for (const d of ["uploads", "outputs", "runs"]) {
+      fs.mkdirSync(path.join(data, d), { recursive: true });
+    }
+    if (toml != null) {
+      fs.mkdirSync(path.join(home, ".grok"), { recursive: true });
+      fs.writeFileSync(path.join(home, ".grok", "config.toml"), toml);
+    }
+    fs.writeFileSync(
+      path.join(data, "settings.local.json"),
+      JSON.stringify({ permissionMode: "default" }),
+    );
+    const app = createApp({
+      root: ROOT,
+      data,
+      catalogPath: path.join(ROOT, "workflows/catalog.json"),
+      publicDir: path.join(ROOT, "public"),
+      grokBin: "/bin/echo",
+      sessionsRoot: path.join(data, "sessions"),
+      settingsHome: home,
+      log: silentLog(),
+    });
+    const local = await listen(app);
+    const { body } = await json(local.base, "/api/health");
+    await new Promise((r) => local.server.close(r));
+    fs.rmSync(home, { recursive: true, force: true });
+    return body;
+  }
+
+  it("warns that a config-level always-approve overrides the chosen mode", async () => {
+    const body = await healthWithHome('permission_mode = "always-approve"\n');
+    assert.equal(body.cliApproval.forcesAlwaysApprove, true);
+    assert.equal(body.approvalConflict.conflict, true);
+    assert.match(body.approvalConflict.message, /will not prompt/);
+  });
+
+  it("reports no conflict for an interactive CLI config", async () => {
+    const body = await healthWithHome('permission_mode = "default"\n');
+    assert.equal(body.cliApproval.forcesAlwaysApprove, false);
+    assert.equal(body.approvalConflict.conflict, false);
+  });
+
+  it("reports no conflict when the CLI has no config at all", async () => {
+    const body = await healthWithHome(null);
+    assert.equal(body.cliApproval.exists, false);
+    assert.equal(body.approvalConflict.conflict, false);
   });
 });

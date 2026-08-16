@@ -2,21 +2,18 @@
  * Mid-run budget enforcement.
  * Tracks estimated + actual USD during a live run and signals when to kill.
  */
-import {
-  DEFAULT_COST_PER_TURN_USD,
-  loadLedger,
-  getBudgetStatus,
-} from "./budget.js";
+import { DEFAULT_COST_PER_TURN_USD, getBudgetStatus } from "./budget.js";
 
 /**
  * Create a per-run budget tracker.
- * @param {{ dataDir: string, maxBudgetUsd?: number|null, sessionId?: string|null, costPerTurn?: number }} opts
+ * @param {{ dataDir: string, maxBudgetUsd?: number|null, sessionId?: string|null, costPerTurn?: number, daySpentTtlMs?: number }} opts
  */
 export function createRunBudgetTracker({
   dataDir,
   maxBudgetUsd,
   sessionId,
   costPerTurn = DEFAULT_COST_PER_TURN_USD,
+  daySpentTtlMs = 1000,
 } = {}) {
   const cap =
     maxBudgetUsd != null && maxBudgetUsd !== ""
@@ -27,12 +24,21 @@ export function createRunBudgetTracker({
   let killed = false;
   let killReason = null;
 
-  function daySpent() {
+  // Re-parsing the whole ledger from disk on every streamed tool event is a
+  // sync read per event. Cache briefly instead — short enough that spend
+  // recorded by a concurrent run still counts against this run's cap.
+  let cachedDaySpent = 0;
+  let cachedAt = -Infinity;
+
+  function daySpent(now = Date.now()) {
+    if (now - cachedAt < daySpentTtlMs) return cachedDaySpent;
     const st = getBudgetStatus(dataDir, {
       maxBudgetUsd: cap,
       sessionId: sessionId || null,
     });
-    return st.spentUsd || 0;
+    cachedDaySpent = st.spentUsd || 0;
+    cachedAt = now;
+    return cachedDaySpent;
   }
 
   function estimatedRunCost() {

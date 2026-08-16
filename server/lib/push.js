@@ -6,6 +6,12 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import http2 from "node:http2";
+import { fileURLToPath } from "url";
+
+const REPO_CERTS = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../ios/certs",
+);
 
 export const DEVICES_FILE = "push-devices.json";
 
@@ -18,6 +24,15 @@ export const DEFAULT_APNS_KEY_PATHS = [
   "/Users/futjr/.appstoreconnect/private_keys/AuthKey_629PDCXMGR.p8",
   "/Users/futjr/Downloads/Certificates/AuthKey_XN32LKUVMM.p8",
 ];
+
+export const DEFAULT_APNS_CERT_PATH = path.join(
+  REPO_CERTS,
+  "apns-heir-studio.crt.pem",
+);
+export const DEFAULT_APNS_TLS_KEY_PATH = path.join(
+  REPO_CERTS,
+  "apns-heir-studio.key",
+);
 
 export const DEFAULT_APNS_KEY_ID = "629PDCXMGR";
 export const DEFAULT_APNS_TEAM_ID = "2Y8MR5FHTC";
@@ -94,24 +109,57 @@ export function removeDevice(dataDir, token) {
   return { ok: true, removed: next.length !== devices.length };
 }
 
+function firstExisting(...candidates) {
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 export function resolveApnsConfig(env = process.env) {
-  const fromEnv = env.HEIR_STUDIO_APNS_KEY_PATH;
+  const bundleId = env.HEIR_STUDIO_APNS_BUNDLE_ID || DEFAULT_APNS_BUNDLE_ID;
+  const certPath = firstExisting(
+    env.HEIR_STUDIO_APNS_CERT_PATH,
+    env.HEIR_STUDIO_APNS_CERT_PATH == null ? DEFAULT_APNS_CERT_PATH : null,
+  );
+  const tlsKeyPath = firstExisting(
+    env.HEIR_STUDIO_APNS_TLS_KEY_PATH,
+    env.HEIR_STUDIO_APNS_TLS_KEY_PATH == null ? DEFAULT_APNS_TLS_KEY_PATH : null,
+  );
+
+  // Prefer the App ID SSL cert (aps.cer + CSR key). Token keys on this
+  // machine are App Store Connect API keys and are not valid for APNs.
+  if (certPath && tlsKeyPath) {
+    const production = env.HEIR_STUDIO_APNS_PRODUCTION !== "0";
+    return {
+      auth: "cert",
+      certPath,
+      tlsKeyPath,
+      bundleId,
+      production,
+      host:
+        env.HEIR_STUDIO_APNS_HOST ||
+        (production ? DEFAULT_APNS_PRODUCTION_HOST : DEFAULT_APNS_SANDBOX_HOST),
+    };
+  }
+
   const keyPath =
-    (fromEnv && fs.existsSync(fromEnv) && fromEnv) ||
-    DEFAULT_APNS_KEY_PATHS.find((p) => fs.existsSync(p)) ||
-    null;
+    env.HEIR_STUDIO_APNS_KEY_PATH != null
+      ? firstExisting(env.HEIR_STUDIO_APNS_KEY_PATH)
+      : firstExisting(...DEFAULT_APNS_KEY_PATHS);
   if (!keyPath) return null;
 
   const fromName = path.basename(keyPath).match(/AuthKey_([A-Z0-9]+)\.p8$/i);
   const production = env.HEIR_STUDIO_APNS_PRODUCTION === "1";
   return {
+    auth: "token",
     keyPath,
     keyId:
       env.HEIR_STUDIO_APNS_KEY_ID ||
       (fromName && fromName[1]) ||
       DEFAULT_APNS_KEY_ID,
     teamId: env.HEIR_STUDIO_APNS_TEAM_ID || DEFAULT_APNS_TEAM_ID,
-    bundleId: env.HEIR_STUDIO_APNS_BUNDLE_ID || DEFAULT_APNS_BUNDLE_ID,
+    bundleId,
     production,
     host:
       env.HEIR_STUDIO_APNS_HOST ||
@@ -141,9 +189,9 @@ export function createApnsJwt({ keyPem, keyId, teamId, now } = {}) {
   return `${unsigned}.${sig.toString("base64url")}`;
 }
 
-function connectApns(host) {
+function connectApns(host, tls) {
   return new Promise((resolve, reject) => {
-    const client = http2.connect(`https://${host}`);
+    const client = http2.connect(`https://${host}`, tls || {});
     const onError = (e) => {
       const err = new Error(e.message || "APNs connection failed");
       err.status = 502;
@@ -159,16 +207,17 @@ function connectApns(host) {
 
 function postApns(client, { token, jwt, topic, body }) {
   return new Promise((resolve) => {
-    const req = client.request({
+    const headers = {
       ":method": "POST",
       ":path": `/3/device/${token}`,
-      authorization: `bearer ${jwt}`,
       "apns-topic": topic,
       "apns-push-type": "alert",
       "apns-priority": "10",
       "apns-expiration": "0",
       "content-type": "application/json",
-    });
+    };
+    if (jwt) headers.authorization = `bearer ${jwt}`;
+    const req = client.request(headers);
     let status = 0;
     let data = "";
     req.on("response", (headers) => {
@@ -213,6 +262,8 @@ export async function sendPush({
   keyPath,
   keyId,
   teamId,
+  certPath,
+  tlsKeyPath,
   bundleId,
   production,
   host,
@@ -223,28 +274,42 @@ export async function sendPush({
   const resolvedHost =
     host ||
     (production ? DEFAULT_APNS_PRODUCTION_HOST : DEFAULT_APNS_SANDBOX_HOST);
-  if (!keyPath || !fs.existsSync(keyPath)) {
-    const err = new Error("APNs key not configured");
-    err.status = 503;
-    throw err;
-  }
-  if (!keyId || !teamId) {
-    const err = new Error("APNs keyId and teamId are required");
-    err.status = 503;
-    throw err;
-  }
+  const useCert =
+    certPath &&
+    tlsKeyPath &&
+    fs.existsSync(certPath) &&
+    fs.existsSync(tlsKeyPath);
 
-  const jwt = createApnsJwt({
-    keyPem: fs.readFileSync(keyPath, "utf8"),
-    keyId,
-    teamId,
-  });
+  let jwt = null;
+  let tls = null;
+  if (useCert) {
+    tls = {
+      cert: fs.readFileSync(certPath),
+      key: fs.readFileSync(tlsKeyPath),
+    };
+  } else {
+    if (!keyPath || !fs.existsSync(keyPath)) {
+      const err = new Error("APNs key not configured");
+      err.status = 503;
+      throw err;
+    }
+    if (!keyId || !teamId) {
+      const err = new Error("APNs keyId and teamId are required");
+      err.status = 503;
+      throw err;
+    }
+    jwt = createApnsJwt({
+      keyPem: fs.readFileSync(keyPath, "utf8"),
+      keyId,
+      teamId,
+    });
+  }
   const topic = bundleId || DEFAULT_APNS_BUNDLE_ID;
   const json = buildApsBody({ title, body, category, payload });
 
   let client;
   try {
-    client = await connectApns(resolvedHost);
+    client = await connectApns(resolvedHost, tls);
   } catch (e) {
     const err = new Error(e.message || "APNs connection failed");
     err.status = e.status || 502;
@@ -299,7 +364,7 @@ function deliver({ dataDir, log, send, resolveConfig, title, body, category, pay
     return { skipped: "no devices" };
   }
   const apns = resolveConfig();
-  if (!apns || !apns.keyPath) {
+  if (!apns || (!apns.certPath && !apns.keyPath)) {
     log?.warn?.("push.skip", { reason: "no apns key", category });
     return { skipped: "no apns key" };
   }
@@ -314,6 +379,8 @@ function deliver({ dataDir, log, send, resolveConfig, title, body, category, pay
       keyPath: apns.keyPath,
       keyId: apns.keyId,
       teamId: apns.teamId,
+      certPath: apns.certPath,
+      tlsKeyPath: apns.tlsKeyPath,
       bundleId: apns.bundleId,
       production: apns.production,
       host: apns.host,

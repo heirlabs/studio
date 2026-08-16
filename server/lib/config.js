@@ -39,8 +39,19 @@ export function createConfig(overrides = {}) {
     catalogPath:
       overrides.catalogPath || path.join(root, "workflows", "catalog.json"),
     publicDir: overrides.publicDir || path.join(root, "public"),
-    host: overrides.host || "127.0.0.1",
-    port: Number(overrides.port ?? process.env.GROK_STUDIO_PORT ?? 3847),
+    // Never widen the bind address implicitly — remote access is opt-in.
+    host: overrides.host || process.env.HEIR_STUDIO_HOST || "127.0.0.1",
+    port: Number(overrides.port ?? process.env.HEIR_STUDIO_PORT ?? 3847),
+    remoteEnabled:
+      overrides.remoteEnabled ?? process.env.HEIR_STUDIO_REMOTE === "1",
+    // false when fronted by a tunnel/proxy: loopback then needs a token too
+    trustLoopback:
+      overrides.trustLoopback ?? process.env.HEIR_STUDIO_TRUST_LOOPBACK !== "0",
+    remoteAllowedCidrs:
+      overrides.remoteAllowedCidrs ||
+      (process.env.HEIR_STUDIO_REMOTE_CIDRS
+        ? process.env.HEIR_STUDIO_REMOTE_CIDRS.split(",").map((s) => s.trim())
+        : null),
     grokBin: overrides.grokBin || resolveGrokBin(process.env, home),
     sessionsRoot:
       overrides.sessionsRoot || path.join(home, ".grok", "sessions"),
@@ -53,7 +64,7 @@ export function createConfig(overrides = {}) {
       path.join(home, ".grok", "models_cache.json"),
     keybindingsPath:
       overrides.keybindingsPath ||
-      path.join(home, ".grok-studio", "keybindings.json"),
+      path.join(home, ".heir-studio", "keybindings.json"),
     settingsHome: overrides.settingsHome || home,
     maxConcurrentRuns: Number(overrides.maxConcurrentRuns ?? 3),
     maxUploadBytes: Number(overrides.maxUploadBytes ?? 80 * 1024 * 1024),

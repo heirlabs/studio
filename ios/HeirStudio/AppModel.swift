@@ -12,6 +12,8 @@ final class AppModel: ObservableObject {
     @Published var suggestedPairing: (url: String, token: String)?
     /// Last run started on this Mac from any client. ChatView attaches if it matches.
     @Published var inboundRun: InboundRun?
+    /// Session the user should be looking at (push / hub). Session list navigates here.
+    @Published var openedSession: SessionSummary?
 
     struct InboundRun: Equatable {
         let sessionId: String
@@ -54,10 +56,11 @@ final class AppModel: ObservableObject {
         guard let stored = Keychain.load() else { return }
         config = stored
         await client.configure(stored)
+        // Upload any token we already have before the health/session fetches.
+        await PushService.shared.requestAuthorizationAndRegister()
         await refreshHealth()
         await refreshSessions()
         startHub()
-        await PushService.shared.requestAuthorizationAndRegister()
     }
 
     func pair(with candidate: ServerConfig) async throws {
@@ -99,6 +102,7 @@ final class AppModel: ObservableObject {
     }
 
     func handleBecameActive() async {
+        await PushService.shared.requestAuthorizationAndRegister()
         guard isPaired else { return }
         startHub()
         await refreshHealth()
@@ -173,12 +177,32 @@ final class AppModel: ObservableObject {
             await refreshSessions()
             if let sid = event.sessionId, let rid = event.runId {
                 inboundRun = InboundRun(sessionId: sid, runId: rid, messageId: event.messageId)
+                openSession(id: sid)
             }
         case ("run", "finished"):
+            await refreshSessions()
+        case ("session", "compacted"):
             await refreshSessions()
         default:
             break
         }
+    }
+
+    func openSession(id: String) {
+        if let match = sessions.first(where: { $0.id == id }) {
+            openedSession = match
+            return
+        }
+        openedSession = SessionSummary(
+            id: id,
+            title: nil,
+            cwd: nil,
+            messageCount: nil,
+            updatedAt: nil,
+            activeRunId: inboundRun?.runId,
+            lastPreview: nil,
+            grokSessionId: nil,
+            context: nil)
     }
 
     func report(_ error: Error) {

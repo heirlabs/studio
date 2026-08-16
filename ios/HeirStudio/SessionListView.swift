@@ -5,6 +5,7 @@ struct SessionListView: View {
     @State private var showSettings = false
     @State private var showProjectPicker = false
     @State private var newSession: SessionSummary?
+    @State private var showSearch = false
 
     var body: some View {
         NavigationStack {
@@ -27,7 +28,12 @@ struct SessionListView: View {
                                         .foregroundStyle(.green)
                                 }
                             }
-                            if let cwd = session.cwd {
+                            if let preview = session.lastPreview, !preview.isEmpty {
+                                Text(preview)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            } else if let cwd = session.cwd {
                                 Text(shortPath(cwd))
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
@@ -49,11 +55,20 @@ struct SessionListView: View {
             .navigationDestination(item: $newSession) { session in
                 ChatView(sessionId: session.id, initialTitle: session.displayTitle)
             }
+            .navigationDestination(item: $model.openedSession) { session in
+                ChatView(sessionId: session.id, initialTitle: session.displayTitle)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showSettings = true } label: {
                         Image(systemName: "gearshape")
                     }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showSearch = true } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel("Search chats")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -68,6 +83,7 @@ struct SessionListView: View {
                 await model.refreshHealth()
             }
             .sheet(isPresented: $showSettings) { ConnectionSettingsView() }
+            .sheet(isPresented: $showSearch) { HistorySearchView() }
             .sheet(isPresented: $showProjectPicker) {
                 ProjectPickerView { cwd in
                     newSession = await model.createSession(cwd: cwd)
@@ -83,11 +99,30 @@ struct SessionListView: View {
 
 struct ConnectionSettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var push = PushService.shared
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Alerts") {
+                    LabeledContent("Notifications", value: push.statusText)
+                    if let detail = push.lastError {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                    if push.authorization == .denied {
+                        Button("Open iPhone Settings") {
+                            push.openSystemSettings()
+                        }
+                    } else {
+                        Button("Enable lock-screen alerts") {
+                            Task { await push.requestAuthorizationAndRegister() }
+                        }
+                    }
+                }
+
                 Section("Mac") {
                     LabeledContent("Address", value: model.config?.baseURL.absoluteString ?? "—")
                     LabeledContent("Grok", value: model.health?.grokVersion ?? "—")

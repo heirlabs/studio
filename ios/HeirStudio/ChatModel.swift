@@ -22,6 +22,8 @@ final class ChatModel: ObservableObject {
     @Published var queuedText: String?
     @Published var context: SessionContext?
     @Published var compacting = false
+    @Published var runStartedAt: Date?
+    @Published var transcriptQuery: String = ""
     @Published var selectedModel: String = ""
     @Published var useWorktree = false
     @Published var maxBudgetUsd: String = ""
@@ -122,8 +124,74 @@ final class ChatModel: ObservableObject {
         pendingImages.removeAll { $0.id == id }
     }
 
+    var visibleMessages: [Message] {
+        let q = transcriptQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return messages }
+        return messages.filter { message in
+            (message.text ?? "").localizedCaseInsensitiveContains(q)
+                || (message.thoughts ?? "").localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    /// TUI slash verbs that must run on the Mac, not as a prompt to Grok.
+    func handleSlash(_ raw: String) -> Bool {
+        guard let verb = ComposerSlash.parse(raw) else { return false }
+        composerText = ""
+        switch verb {
+        case .compact(let keep):
+            Task { await compact(keep: keep) }
+        case .rewind:
+            NotificationCenter.default.post(name: .heirOpenRewind, object: sessionId)
+        case .context:
+            Task { await refreshContext() }
+        case .stop:
+            Task { await cancel() }
+        }
+        return true
+    }
+
+    func refreshContext() async {
+        do {
+            let ctx = try await client.sessionContext(sessionId)
+            context = ctx.context
+            if let percent = ctx.context?.percent {
+                note("Context \(percent)% of the Grok window.")
+            } else {
+                note("No compact has run in this chat yet.")
+            }
+        } catch {
+            onError(error)
+        }
+    }
+
+    func rewind(to point: RewindPoint) async {
+        guard !isRunning else {
+            note("Stop the turn before rewind.")
+            return
+        }
+        do {
+            let result = try await client.rewindSession(sessionId, to: point.id)
+            if let session = result.session {
+                messages = session.messages
+                context = session.context ?? context
+                title = session.title ?? title
+            } else {
+                let detail = try await client.session(sessionId)
+                messages = detail.messages
+            }
+            var text = "Rewound to that turn. Files on disk were not reverted."
+            if result.grokRewound == false, let err = result.grokError, !err.isEmpty {
+                text += " Grok history: \(err)"
+            }
+            note(text)
+        } catch {
+            onError(error)
+        }
+    }
+
     func send() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if handleSlash(text) { return }
         guard canSend else { return }
         if isRunning {
             queuedText = text.isEmpty ? nil : text
@@ -137,6 +205,7 @@ final class ChatModel: ObservableObject {
         pendingMacFiles = []
         isRunning = true
         runStatus = "running"
+        runStartedAt = Date()
         reconnecting = false
         lastSeq = 0
         tools.removeAll()
@@ -205,6 +274,7 @@ final class ChatModel: ObservableObject {
             isRunning = false
             runStatus = "cancelled"
             currentRunId = nil
+            runStartedAt = nil
             reconnecting = false
         }
     }
@@ -383,6 +453,7 @@ final class ChatModel: ObservableObject {
                     name: "compact",
                     kind: .note,
                     detail: "\(event.trigger ?? "auto") \(before) → \(after)"))
+            Task { await refreshContext() }
 
         case ("studio", "session_resume_failed"):
             append(
@@ -438,6 +509,7 @@ final class ChatModel: ObservableObject {
         isRunning = false
         runStatus = status
         currentRunId = nil
+        runStartedAt = nil
         // A dismissed prompt for a finished run would answer nothing.
         pendingPermission = nil
         lastSeq = 0
@@ -544,5 +616,33 @@ final class ChatModel: ObservableObject {
         streamTask?.cancel()
         streamTask = nil
         endBackgroundGrace()
+    }
+}
+
+extension Notification.Name {
+    static let heirOpenRewind = Notification.Name("heir.openRewind")
+}
+
+enum ComposerSlash: Equatable {
+    case compact(keep: String?)
+    case rewind
+    case context
+    case stop
+
+    static func parse(_ raw: String) -> ComposerSlash? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return nil }
+        let body = String(trimmed.dropFirst())
+        let space = body.firstIndex(of: " ")
+        let cmd = (space == nil ? body : String(body[..<space!])).lowercased()
+        let rest = space == nil ? "" : String(body[body.index(after: space!)...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        switch cmd {
+        case "compact": return .compact(keep: rest.isEmpty ? nil : rest)
+        case "rewind", "undo": return .rewind
+        case "context": return .context
+        case "stop", "cancel": return .stop
+        default: return nil
+        }
     }
 }

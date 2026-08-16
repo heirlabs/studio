@@ -47,15 +47,32 @@ describe("resolveTunnelPlan", () => {
       });
       assert.equal(plan.mode, "token");
       assert.equal(plan.url, "https://agent.example.com");
+      assert.equal(plan.args[0], "tunnel");
+      assert.ok(plan.args.includes("--token-file"));
+      assert.ok(!plan.args.includes("--token"));
+      assert.ok(!plan.args.includes("tok123"));
+      assert.equal(plan.writeTokenFile?.contents, "tok123");
+      // ingress is configured in Cloudflare, so no --url is passed
+      assert.ok(!plan.args.includes("--url"));
+    });
+
+    it("uses an existing token file without putting the secret on argv", () => {
+      const plan = resolveTunnelPlan({
+        env: {
+          CLOUDFLARE_TUNNEL_TOKEN_FILE: "/secret/cf.token",
+          HEIR_STUDIO_TUNNEL_HOSTNAME: "a.example.com",
+        },
+        certExists: false,
+      });
+      assert.equal(plan.mode, "token");
       assert.deepEqual(plan.args, [
         "tunnel",
         "--no-autoupdate",
         "run",
-        "--token",
-        "tok123",
+        "--token-file",
+        "/secret/cf.token",
       ]);
-      // ingress is configured in Cloudflare, so no --url is passed
-      assert.ok(!plan.args.includes("--url"));
+      assert.equal(plan.writeTokenFile, undefined);
     });
 
     it("needs no local cert", () => {

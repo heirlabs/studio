@@ -656,6 +656,56 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     delete process.env.FAKE_GROK_SLEEP_MS;
   });
 
+  it("rewinds the transcript to an earlier user turn", async () => {
+    process.env.FAKE_GROK_MODE = "pong";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+    const first = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "first turn",
+        workflowId: "code-agent",
+        cwd: ROOT,
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    await waitForRun(ctx.base, first.body.run.id);
+    const second = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "second turn",
+        workflowId: "code-agent",
+        cwd: ROOT,
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    await waitForRun(ctx.base, second.body.run.id);
+    const listed = await json(ctx.base, `/api/sessions/${sid}/rewinds`);
+    assert.equal(listed.res.status, 200);
+    assert.ok(listed.body.points.length >= 2);
+    const target = listed.body.points[0];
+    const rewound = await json(ctx.base, `/api/sessions/${sid}/rewind`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messageId: target.id }),
+    });
+    assert.equal(rewound.res.status, 200, JSON.stringify(rewound.body));
+    assert.equal(rewound.body.ok, true);
+    assert.equal(rewound.body.filesReverted, false);
+    const after = await json(ctx.base, `/api/sessions/${sid}`);
+    const users = (after.body.messages || []).filter((m) => m.role === "user");
+    assert.equal(users.length, 1);
+    assert.equal(users[0].text, "first turn");
+  });
+
   it("second interactive turn resumes the stored ACP session", async () => {
     process.env.FAKE_GROK_MODE = "acp-permission";
     const created = await json(ctx.base, "/api/sessions", {

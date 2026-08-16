@@ -15,16 +15,20 @@ therefore gated on **two** independent things:
    `fd7a:115c:a1e0::/48`, i.e. Tailscale only), **and**
 2. a bearer token, compared in constant time.
 
-On top of that, a run started by a remote client **cannot silently inherit
-`bypassPermissions`** — it is downgraded to a mode that asks, unless the client
-explicitly sends `allowBypassPermissions: true`. If the token ever leaked, the
-attacker still faces an approval prompt rather than a shell.
+On top of that, a run started by a remote client **cannot inherit
+`bypassPermissions`**. It is always downgraded to a mode that asks. A request
+flag cannot opt back in.
+
+Put **Cloudflare Access** in front of the public hostname (email one-time PIN
+for you, plus a service token for the iPhone). The app bearer is then a second
+gate, not the only one.
 
 The token lives in the iOS Keychain (`WhenUnlockedThisDeviceOnly`, never synced).
 
 ## Setup — Cloudflare Tunnel (recommended)
 
-One command. It starts the server, opens the tunnel, and prints a pairing link:
+One command. It starts the server and opens the tunnel. The pairing secret is
+written to `data/pairing.url` (mode 0600), never to the log:
 
 ```bash
 npm run tunnel
@@ -36,15 +40,19 @@ the server by hand with loopback still trusted would hand the public internet an
 unauthenticated shell. `npm run tunnel` forces `trustLoopback: false`, so the
 token is required on every request.
 
-Pair by sending yourself the printed `heirstudio://pair?...` link (Messages,
-Notes, AirDrop) and tapping it on the phone. It pre-fills the fields; you still
-tap Connect. If the phone is already paired you get a "Connect to this Mac?"
-confirmation — which you will use often, because a free quick-tunnel URL changes
-on every restart. A stable hostname needs a Cloudflare account and a domain.
+The pairing secret is **not** printed to the tunnel log. On this Mac:
 
-**What this exposes.** The URL is public. The bearer token is the only thing
-between it and a shell on your Mac; repeated bad tokens get throttled, but
-anyone holding both URL and token is in. Rotate immediately if it leaks:
+```bash
+open "$(tr -d '\n' < data/pairing.url)"
+# or
+curl -s http://127.0.0.1:3847/api/remote/pairing
+```
+
+AirDrop the pairing link if you must move it. Do not paste it into Messages or
+Notes — those land in backups and lock-screen previews.
+
+**What this exposes.** The URL is public until Cloudflare Access is on. The
+bearer is still equivalent to a shell if it leaks. Rotate immediately if it does:
 
 ```bash
 curl -X POST http://127.0.0.1:3847/api/remote/rotate
@@ -69,7 +77,38 @@ On this Mac the named tunnel should come up at login so the phone can reach
 That installs a user LaunchAgent (`ai.heir.studio.tunnel`) which runs
 `scripts/macos/tunnel-login.sh` → `npm run tunnel` (named tunnel from
 `.env.tunnel`). It will not start a second server if port 3847 is already
-listening. Logs: `~/Library/Logs/heir-studio-tunnel.log`.
+listening. Logs: `~/Library/Logs/heir-studio-tunnel.log` (owner-only).
+
+## Cloudflare Access (second factor)
+
+Do this in the Zero Trust dashboard. I cannot flip it from this Mac without a
+Cloudflare API token.
+
+1. **Zero Trust → Integrations → Identity providers → Add → One-time PIN.**
+2. **Access controls → Service credentials → Service Tokens → Create**
+   named `heir-studio-iphone`. Copy the Client ID and Client Secret once.
+3. Put them in `.env.tunnel` (already gitignored, mode 0600):
+
+   ```
+   CF_ACCESS_CLIENT_ID=….access
+   CF_ACCESS_CLIENT_SECRET=…
+   ```
+
+4. **Access controls → Applications → Add an application → Self-hosted**
+   - Name: `Heir Studio`
+   - Domain: `studio.heir.es`
+   - Session duration: 24 hours
+5. Add **two** policies, in this order:
+   - **Service Auth** — include the `heir-studio-iphone` service token
+     (this is what the iPhone sends as `CF-Access-Client-Id` /
+     `CF-Access-Client-Secret`).
+   - **Allow** — include your email, identity provider = One-time PIN
+     (this is the OTP for a browser hitting the hostname).
+6. Restart the tunnel so pairing picks up the service token, then re-pair
+   the phone from this Mac (`open "$(tr -d '\n' < data/pairing.url)"`).
+
+Until step 6 ships in TestFlight, **do not enable the application** or the
+current phone build will get an Access login HTML page instead of JSON.
 
 Sleep-proofing is `caffeinate -dims` inside `scripts/tunnel.mjs`, not
 `pmset`. The Mac will not idle-sleep while the tunnel process is up.

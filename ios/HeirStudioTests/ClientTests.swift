@@ -24,6 +24,29 @@ final class ServerConfigTests: XCTestCase {
         XCTAssertThrowsError(try ServerConfig.parse(urlString: "   ", token: "t"))
         XCTAssertThrowsError(try ServerConfig.parse(urlString: "http://", token: "t"))
     }
+
+    func testParsesTuiSlashCommands() {
+        XCTAssertEqual(ComposerSlash.parse("/compact"), .compact(keep: nil))
+        XCTAssertEqual(ComposerSlash.parse("/compact keep auth"), .compact(keep: "keep auth"))
+        XCTAssertEqual(ComposerSlash.parse("  /rewind  "), .rewind)
+        XCTAssertEqual(ComposerSlash.parse("/undo"), .rewind)
+        XCTAssertEqual(ComposerSlash.parse("/context"), .context)
+        XCTAssertEqual(ComposerSlash.parse("/stop"), .stop)
+        XCTAssertEqual(ComposerSlash.parse("/cancel"), .stop)
+        XCTAssertNil(ComposerSlash.parse("compact"))
+        XCTAssertNil(ComposerSlash.parse("/unknown"))
+        XCTAssertNil(ComposerSlash.parse(""))
+    }
+
+    func testKeepsAccessServiceToken() throws {
+        let config = try ServerConfig.parse(
+            urlString: "https://studio.heir.es",
+            token: "t",
+            accessClientId: "cid.access",
+            accessClientSecret: "csec")
+        XCTAssertEqual(config.accessClientId, "cid.access")
+        XCTAssertEqual(config.accessClientSecret, "csec")
+    }
 }
 
 final class StreamEventDecodingTests: XCTestCase {

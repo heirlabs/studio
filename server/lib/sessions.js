@@ -66,6 +66,8 @@ function toSummary(session) {
     pinned: Boolean(session.pinned),
     lastPreview: session.lastPreview || "",
     activeRunId: session.activeRunId || null,
+    grokSessionId: session.grokSessionId || null,
+    context: session.context || null,
   };
 }
 
@@ -403,6 +405,56 @@ export function searchMessageHistory(dataDir, query, { limit = 40 } = {}) {
 /**
  * Recent user prompts for history search when query is empty.
  */
+export function listRewindPoints(session) {
+  const messages = session?.messages || [];
+  const points = [];
+  let userIndex = -1;
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+    userIndex += 1;
+    points.push({
+      id: m.id,
+      index: userIndex,
+      text: String(m.text || "").slice(0, 240),
+      createdAt: m.createdAt || null,
+    });
+  }
+  return points;
+}
+
+/**
+ * Keep the chosen user turn and everything before it. Drop later turns.
+ * Does not revert files on disk — same contract as TUI /rewind.
+ */
+export function rewindToMessage(dataDir, sessionId, messageId) {
+  const session = readSession(dataDir, sessionId);
+  if (!session) {
+    const err = new Error("session not found");
+    err.status = 404;
+    throw err;
+  }
+  if (session.activeRunId) {
+    const err = new Error("Cannot rewind while a run is live");
+    err.status = 409;
+    throw err;
+  }
+  const messages = session.messages || [];
+  const idx = messages.findIndex((m) => m.id === messageId && m.role === "user");
+  if (idx < 0) {
+    const err = new Error("rewind point not found");
+    err.status = 404;
+    throw err;
+  }
+  session.messages = messages.slice(0, idx + 1);
+  const lastUser = [...session.messages].reverse().find((m) => m.role === "user");
+  session.lastPreview = String(lastUser?.text || "").slice(0, 160);
+  session.updatedAt = Date.now();
+  writeSession(dataDir, session);
+  touchIndex(dataDir, session, false);
+  const userIndex = session.messages.filter((m) => m.role === "user").length - 1;
+  return { session, userIndex };
+}
+
 export function listRecentUserPrompts(dataDir, { limit = 30 } = {}) {
   const { sessions } = listSessions(dataDir);
   const hits = [];

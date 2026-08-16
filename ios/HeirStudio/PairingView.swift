@@ -7,6 +7,8 @@ struct PairingView: View {
     @EnvironmentObject private var model: AppModel
     @State private var urlText = ""
     @State private var token = ""
+    @State private var accessClientId = ""
+    @State private var accessClientSecret = ""
     @State private var isScanning = false
     @State private var isConnecting = false
     @State private var errorText: String?
@@ -32,6 +34,12 @@ struct PairingView: View {
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                     SecureField("Pairing token", text: $token)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Access client id (optional)", text: $accessClientId)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Access client secret (optional)", text: $accessClientSecret)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
@@ -61,6 +69,8 @@ struct PairingView: View {
                 guard let suggestion = model.suggestedPairing else { return }
                 urlText = suggestion.url
                 token = suggestion.token
+                accessClientId = suggestion.accessClientId ?? ""
+                accessClientSecret = suggestion.accessClientSecret ?? ""
             }
             .sheet(isPresented: $isScanning) {
                 QRScannerView { scanned in
@@ -79,11 +89,21 @@ struct PairingView: View {
         {
             urlText = items.first(where: { $0.name == "url" })?.value ?? urlText
             token = items.first(where: { $0.name == "token" })?.value ?? token
+            accessClientId =
+                items.first(where: { $0.name == "access_client_id" })?.value
+                ?? items.first(where: { $0.name == "accessClientId" })?.value
+                ?? accessClientId
+            accessClientSecret =
+                items.first(where: { $0.name == "access_client_secret" })?.value
+                ?? items.first(where: { $0.name == "accessClientSecret" })?.value
+                ?? accessClientSecret
         } else if let data = raw.data(using: .utf8),
             let decoded = try? JSONDecoder().decode(PairPayload.self, from: data)
         {
             urlText = decoded.url
             token = decoded.token
+            accessClientId = decoded.accessClientId ?? accessClientId
+            accessClientSecret = decoded.accessClientSecret ?? accessClientSecret
         } else {
             errorText = "That QR code is not a Heir Studio pairing code."
             return
@@ -94,6 +114,8 @@ struct PairingView: View {
     private struct PairPayload: Decodable {
         let url: String
         let token: String
+        let accessClientId: String?
+        let accessClientSecret: String?
     }
 
     private func connect() async {
@@ -101,7 +123,11 @@ struct PairingView: View {
         isConnecting = true
         defer { isConnecting = false }
         do {
-            let config = try ServerConfig.parse(urlString: urlText, token: token)
+            let config = try ServerConfig.parse(
+                urlString: urlText,
+                token: token,
+                accessClientId: accessClientId.isEmpty ? nil : accessClientId,
+                accessClientSecret: accessClientSecret.isEmpty ? nil : accessClientSecret)
             try await model.pair(with: config)
         } catch {
             errorText =

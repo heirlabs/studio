@@ -9,7 +9,14 @@ final class AppModel: ObservableObject {
     @Published var banner: Banner?
     /// Credentials handed in by a `heirstudio://pair` link. Pre-filled only —
     /// a link can arrive from anywhere, so connecting stays an explicit tap.
-    @Published var suggestedPairing: (url: String, token: String)?
+    struct SuggestedPairing: Equatable {
+        let url: String
+        let token: String
+        let accessClientId: String?
+        let accessClientSecret: String?
+    }
+
+    @Published var suggestedPairing: SuggestedPairing?
     /// Last run started on this Mac from any client. ChatView attaches if it matches.
     @Published var inboundRun: InboundRun?
     /// Session the user should be looking at (push / hub). Session list navigates here.
@@ -23,7 +30,7 @@ final class AppModel: ObservableObject {
 
     private var hubTask: Task<Void, Never>?
 
-    /// Parse `heirstudio://pair?url=…&token=…`.
+    /// Parse `heirstudio://pair?url=…&token=…` (optional Access service token).
     func acceptPairingLink(_ url: URL) {
         guard url.scheme == "heirstudio",
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -31,7 +38,13 @@ final class AppModel: ObservableObject {
             let server = items.first(where: { $0.name == "url" })?.value,
             let token = items.first(where: { $0.name == "token" })?.value
         else { return }
-        suggestedPairing = (server, token)
+        suggestedPairing = SuggestedPairing(
+            url: server,
+            token: token,
+            accessClientId: items.first(where: { $0.name == "access_client_id" })?.value
+                ?? items.first(where: { $0.name == "accessClientId" })?.value,
+            accessClientSecret: items.first(where: { $0.name == "access_client_secret" })?.value
+                ?? items.first(where: { $0.name == "accessClientSecret" })?.value)
     }
 
     /// Shared with ChatView, which NavigationStack constructs without access to
@@ -82,7 +95,10 @@ final class AppModel: ObservableObject {
         suggestedPairing = nil
         do {
             try await pair(with: ServerConfig.parse(
-                urlString: suggestion.url, token: suggestion.token))
+                urlString: suggestion.url,
+                token: suggestion.token,
+                accessClientId: suggestion.accessClientId,
+                accessClientSecret: suggestion.accessClientSecret))
             banner = Banner(level: .info, text: "Connected to \(suggestion.url)")
         } catch {
             report(error)
@@ -116,6 +132,14 @@ final class AppModel: ObservableObject {
             health = h
             surfaceApprovalConflict(h)
         } catch {
+            if let studio = error as? StudioError, studio == .unauthorized {
+                banner = Banner(
+                    level: .error,
+                    text: "This phone's token was rejected. Unpair and scan the QR on the Mac.")
+                hubTask?.cancel()
+                hubTask = nil
+                return
+            }
             report(error)
         }
     }
@@ -162,6 +186,9 @@ final class AppModel: ObservableObject {
                     }
                 } catch is CancellationError {
                     return
+                } catch let error as StudioError where error == .unauthorized {
+                    await self.report(error)
+                    return
                 } catch {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
@@ -182,6 +209,8 @@ final class AppModel: ObservableObject {
         case ("run", "finished"):
             await refreshSessions()
         case ("session", "compacted"):
+            await refreshSessions()
+        case ("session", "rewound"):
             await refreshSessions()
         default:
             break

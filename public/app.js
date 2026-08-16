@@ -86,6 +86,52 @@ function paintContextBadge(ctx) {
   }
 }
 
+async function rewindActiveSession() {
+  if (!state.activeSessionId) {
+    toast("Open a chat first", "err");
+    return;
+  }
+  if (state.running) {
+    toast("Stop the turn before rewind", "err");
+    return;
+  }
+  let list;
+  try {
+    list = await api(`/api/sessions/${state.activeSessionId}/rewinds`);
+  } catch (e) {
+    toast(e.message, "err");
+    return;
+  }
+  const points = list.points || [];
+  if (!points.length) {
+    toast("No turns to rewind", "err");
+    return;
+  }
+  const lines = points.map((p, i) => `${i + 1}. ${(p.text || "").slice(0, 80)}`);
+  const pick = window.prompt(
+    `Rewind to which turn? Files on disk are not reverted.\n\n${lines.join("\n")}\n\nEnter a number:`,
+    String(points.length),
+  );
+  const n = Number(pick);
+  if (!Number.isInteger(n) || n < 1 || n > points.length) return;
+  try {
+    const data = await api(`/api/sessions/${state.activeSessionId}/rewind`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messageId: points[n - 1].id }),
+    });
+    await openSession(state.activeSessionId);
+    toast(
+      data.grokRewound
+        ? "Rewound. Files on disk were not reverted."
+        : `Transcript rewound. Grok: ${data.grokError || "history may still be long"}`,
+      data.grokRewound ? "ok" : "err",
+    );
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
 async function compactActiveSession() {
   if (!state.activeSessionId) {
     toast("Open a chat first", "err");
@@ -2031,6 +2077,9 @@ async function init() {
   $("#btn-checkpoint").addEventListener("click", () => openCheckpoints());
   $("#btn-compact").addEventListener("click", () => {
     compactActiveSession().catch((e) => toast(e.message, "err"));
+  });
+  $("#btn-rewind").addEventListener("click", () => {
+    rewindActiveSession().catch((e) => toast(e.message, "err"));
   });
   $("#btn-settings").addEventListener("click", () => openSettings());
   $("#perm-chip").addEventListener("click", () => cyclePermission());

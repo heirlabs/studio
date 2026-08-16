@@ -1,5 +1,6 @@
 import express from "express";
 import multer from "multer";
+import os from "os";
 import path from "path";
 import fs from "fs";
 import { execFileSync } from "child_process";
@@ -13,6 +14,18 @@ import {
 import { safeName } from "./lib/template.js";
 import { createRunManager } from "./lib/runs.js";
 import { getProject, setProject } from "./lib/projects.js";
+import { listDirectories, listEntries, readFileText } from "./lib/fs-browse.js";
+import {
+  status as gitStatus,
+  diff as gitDiff,
+  commit as gitCommit,
+  push as gitPush,
+} from "./lib/git-ops.js";
+import {
+  registerDevice,
+  removeDevice,
+  attachPushHooks,
+} from "./lib/push.js";
 import {
   listSessions,
   getSession,
@@ -78,6 +91,48 @@ import {
   isGitRepo,
 } from "./lib/worktrees.js";
 import { needsInteractiveApprovals } from "./lib/acp-client.js";
+import {
+  readCliApprovalPolicy,
+  describeApprovalConflict,
+} from "./lib/cli-config.js";
+import {
+  TAILSCALE_CIDRS,
+  evaluateAccess,
+  loadOrCreateToken,
+  rotateToken,
+  normalizeIp,
+  detectTailnetAddress,
+  createAuthThrottle,
+  requestLooksTunneled,
+} from "./lib/remote.js";
+import { createHub, sessionHubPayload } from "./lib/hub.js";
+
+/**
+ * The mode a remote-originated run actually runs in, given that bypass is
+ * downgraded unless explicitly requested. Kept next to runOptionsFromBody's
+ * rule so the two cannot drift.
+ */
+export function effectiveRemotePermissionMode(settingsMode) {
+  return settingsMode === "bypassPermissions" ? "default" : settingsMode;
+}
+
+/** Concrete next steps when the phone cannot connect yet. */
+export function buildPairingHints(cfg, tailnetIp) {
+  const hints = [];
+  if (!cfg.remoteEnabled) {
+    hints.push("Remote access is off. Start with HEIR_STUDIO_REMOTE=1.");
+  }
+  if (!tailnetIp) {
+    hints.push(
+      "No Tailscale address on this Mac. Install Tailscale and sign in on both the Mac and the phone.",
+    );
+  } else if (cfg.host !== tailnetIp && cfg.host !== "0.0.0.0") {
+    hints.push(
+      `Server is bound to ${cfg.host}, so the phone cannot reach it. Restart with HEIR_STUDIO_HOST=${tailnetIp}.`,
+    );
+  }
+  return hints;
+}
 
 /**
  * Build the Express app. Exportable for tests without listening.
@@ -86,22 +141,73 @@ export function createApp(overrides = {}) {
   const cfg = createConfig(overrides);
   const log = overrides.log || createLogger();
   const runs = createRunManager(cfg, log);
+  attachPushHooks(runs, { dataDir: cfg.data, log });
+  const hub = createHub();
 
   const app = express();
   app.disable("x-powered-by");
   app.locals.cfg = cfg;
   app.locals.runs = runs;
+  app.locals.hub = hub;
   app.locals.log = log;
 
   app.use(express.json({ limit: "4mb" }));
 
+  // Remote access is opt-in and requires a source address inside an allowed
+  // range *and* a bearer token. Loopback is unchanged and needs neither.
+  const remoteAllowedCidrs = cfg.remoteAllowedCidrs || TAILSCALE_CIDRS;
+  const remoteToken = cfg.remoteEnabled ? loadOrCreateToken(cfg.data).token : null;
+  const authThrottle = createAuthThrottle();
+
+  // A local reverse proxy or tunnel makes every request look like loopback, so
+  // trusting loopback while remote access is on would expose an unauthenticated
+  // shell to whatever the proxy is fronting. Say so, loudly, at startup.
+  if (cfg.remoteEnabled && cfg.trustLoopback !== false) {
+    log.warn("remote.loopback_trusted", {
+      warning:
+        "Remote access is enabled while loopback is trusted. If you front this " +
+        "server with a tunnel or reverse proxy, its requests will bypass the " +
+        "token entirely. Set HEIR_STUDIO_TRUST_LOOPBACK=0 for that setup.",
+    });
+  }
+
   app.use((req, res, next) => {
-    const ip = req.socket.remoteAddress || "";
-    if (!isLoopback(ip)) {
-      log.warn("reject.non_loopback", { ip, path: req.path });
-      res.status(403).json({ error: "Grok Studio is local-only (127.0.0.1)." });
+    const ip = normalizeIp(req.socket.remoteAddress || "");
+    const isLoopbackIp = isLoopback(req.socket.remoteAddress || "");
+
+    // Only throttle the authenticated path; a trusted local UI is never gated.
+    const gated = !isLoopbackIp || cfg.trustLoopback === false;
+    if (gated) {
+      const { blocked, retryAfterMs } = authThrottle.check();
+      if (blocked) {
+        res.set("Retry-After", String(Math.ceil(retryAfterMs / 1000)));
+        res.status(429).json({ error: "Too many failed attempts." });
+        return;
+      }
+    }
+
+    const verdict = evaluateAccess({
+      ip,
+      authorization: req.get("authorization"),
+      cookie: req.get("cookie"),
+      isLoopbackIp,
+      remoteEnabled: Boolean(cfg.remoteEnabled),
+      allowedCidrs: remoteAllowedCidrs,
+      token: remoteToken,
+      trustLoopback: cfg.trustLoopback !== false,
+      viaTunnel: requestLooksTunneled(req),
+    });
+    if (!verdict.allow) {
+      if (gated && verdict.status === 401) {
+        const { locked } = authThrottle.recordFailure();
+        if (locked) log.warn("remote.auth_locked_out", { ip });
+      }
+      log.warn("reject.access", { ip, path: req.path, status: verdict.status });
+      res.status(verdict.status).json({ error: verdict.error });
       return;
     }
+    if (gated) authThrottle.recordSuccess();
+    req.isRemoteClient = verdict.remote;
     next();
   });
 
@@ -148,9 +254,9 @@ export function createApp(overrides = {}) {
     };
   }
 
-  function runOptionsFromBody(body, settings) {
+  function runOptionsFromBody(body, settings, { remote = false } = {}) {
     const s = settings || loadSettings(settingsCtx({ body })).settings;
-    const permissionMode =
+    let permissionMode =
       body.permissionMode != null
         ? normalizePermissionMode(body.permissionMode)
         : body.yolo === false
@@ -158,6 +264,19 @@ export function createApp(overrides = {}) {
           : body.yolo === true
             ? "bypassPermissions"
             : s.permissionMode;
+
+    // A remote client must not get blanket auto-approval by inheriting the
+    // local default — if its token ever leaked that would be a remote shell.
+    // Bypass stays possible, but only when asked for explicitly.
+    let permissionDowngradedFrom = null;
+    if (
+      remote &&
+      permissionMode === "bypassPermissions" &&
+      body.allowBypassPermissions !== true
+    ) {
+      permissionDowngradedFrom = permissionMode;
+      permissionMode = "default";
+    }
 
     let model = body.model != null ? String(body.model).trim() : s.model;
     let reasoningEffort =
@@ -216,22 +335,38 @@ export function createApp(overrides = {}) {
         body.interactive != null
           ? Boolean(body.interactive)
           : needsInteractiveApprovals(permissionMode),
+      permissionDowngradedFrom,
     };
   }
 
-  app.get("/api/health", (_req, res) => {
-    let version = null;
-    let grokOk = false;
+  // `grok --version` is a synchronous subprocess that blocks the event loop for
+  // up to 5s. The UI polls health on load and after every run, so cache it.
+  const GROK_PROBE_TTL_MS = 30_000;
+  let grokProbe = null;
+
+  function probeGrok() {
+    if (grokProbe && Date.now() - grokProbe.at < GROK_PROBE_TTL_MS) {
+      return grokProbe;
+    }
+    let version;
+    let ok;
     try {
       version = execFileSync(cfg.grokBin, ["--version"], {
         encoding: "utf8",
         timeout: 5000,
       }).trim();
-      grokOk = true;
+      ok = true;
     } catch (e) {
       version = `error: ${e.message}`;
-      grokOk = false;
+      ok = false;
     }
+    grokProbe = { version, ok, at: Date.now() };
+    return grokProbe;
+  }
+
+  app.get("/api/health", (req, res) => {
+    const { version, ok: grokOk } = probeGrok();
+    const cliApproval = readCliApprovalPolicy(cfg.settingsHome || cfg.home);
     const { settings } = loadSettings({
       dataDir: cfg.data,
       home: cfg.settingsHome || cfg.home,
@@ -264,6 +399,20 @@ export function createApp(overrides = {}) {
         maxTurns: settings.maxTurns,
         maxBudgetUsd: settings.maxBudgetUsd,
       },
+      cliApproval,
+      // `grok agent stdio` takes no --permission-mode, so a config-level
+      // always-approve silently wins over the selected mode. Say so.
+      //
+      // For a remote client, evaluate the mode its runs would ACTUALLY get
+      // after the bypass downgrade — otherwise a Mac defaulting to
+      // bypassPermissions reports "no conflict" while the downgrade it relies
+      // on for safety is being silently overridden.
+      approvalConflict: describeApprovalConflict(
+        req.isRemoteClient
+          ? effectiveRemotePermissionMode(settings.permissionMode)
+          : settings.permissionMode,
+        cliApproval,
+      ),
     });
   });
 
@@ -292,6 +441,103 @@ export function createApp(overrides = {}) {
     }
   });
 
+  // Browse this Mac so a phone can pick a project cwd or inspect a file.
+  app.get("/api/fs", (req, res) => {
+    try {
+      const includeFiles =
+        req.query?.files === "1" || req.query?.files === "true";
+      res.json(
+        includeFiles
+          ? listEntries(req.query?.path)
+          : listDirectories(req.query?.path),
+      );
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/file", (req, res) => {
+    try {
+      res.json(readFileText(req.query?.path));
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/git/status", (req, res) => {
+    try {
+      res.json(gitStatus(req.query?.cwd || projectCwdFromReq(req)));
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/git/diff", (req, res) => {
+    try {
+      const staged =
+        req.query?.staged === "1" || req.query?.staged === "true";
+      const filePath = req.query?.path ? String(req.query.path) : undefined;
+      res.json(
+        gitDiff(req.query?.cwd || projectCwdFromReq(req), {
+          staged,
+          path: filePath,
+        }),
+      );
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/git/commit", (req, res) => {
+    try {
+      const body = req.body || {};
+      res.json(
+        gitCommit(body.cwd || projectCwdFromReq(req), {
+          message: body.message,
+          paths: body.paths,
+        }),
+      );
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/git/push", (req, res) => {
+    try {
+      const body = req.body || {};
+      res.json(
+        gitPush(body.cwd || projectCwdFromReq(req), {
+          remote: body.remote,
+          branch: body.branch,
+        }),
+      );
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/device/push", (req, res) => {
+    try {
+      const rec = registerDevice(cfg.data, {
+        token: req.body?.token,
+        bundleId: req.body?.bundleId,
+      });
+      log.info("push.register", { suffix: rec.token.slice(-8) });
+      res.json({ ok: true, device: rec });
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/device/push", (req, res) => {
+    try {
+      const token = req.body?.token || req.query?.token;
+      res.json(removeDevice(cfg.data, token));
+    } catch (e) {
+      res.status(e.status || 400).json({ error: e.message });
+    }
+  });
+
   // ── Chat sessions (multi-tab drawer) ──────────────────────────────
   app.get("/api/sessions", (_req, res) => {
     res.json(listSessions(cfg.data));
@@ -310,6 +556,11 @@ export function createApp(overrides = {}) {
       workflowId: body.workflowId || "code-agent",
     });
     log.info("session.create", { id: session.id, cwd });
+    hub.publish({
+      type: "session",
+      event: "created",
+      session: sessionHubPayload(session),
+    });
     res.status(201).json(session);
   });
 
@@ -329,6 +580,11 @@ export function createApp(overrides = {}) {
   app.patch("/api/sessions/:id", (req, res) => {
     try {
       const session = updateSession(cfg.data, req.params.id, req.body || {});
+      hub.publish({
+        type: "session",
+        event: "updated",
+        session: sessionHubPayload(session),
+      });
       res.json(session);
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message });
@@ -345,7 +601,13 @@ export function createApp(overrides = {}) {
 
   app.delete("/api/sessions/:id", (req, res) => {
     try {
-      res.json(deleteSession(cfg.data, req.params.id));
+      const out = deleteSession(cfg.data, req.params.id);
+      hub.publish({
+        type: "session",
+        event: "deleted",
+        session: { id: req.params.id },
+      });
+      res.json(out);
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message });
     }
@@ -422,6 +684,7 @@ export function createApp(overrides = {}) {
       const runOpts = runOptionsFromBody(
         { ...body, prompt: text },
         settings,
+        { remote: req.isRemoteClient },
       );
 
       const { id, meta } = runs.startRun({
@@ -446,11 +709,28 @@ export function createApp(overrides = {}) {
             grokSessionId: finishedMeta.sessionId,
           });
           setSessionActiveRun(cfg.data, sessionId, null);
+          hub.publish({
+            type: "run",
+            event: "finished",
+            sessionId,
+            runId: id,
+            messageId: assistantMsgId,
+            status: finishedMeta.status,
+            session: sessionHubPayload(getSession(cfg.data, sessionId)),
+          });
         },
       });
 
       attachRunToAssistantMessage(cfg.data, sessionId, assistantMsgId, id);
       setSessionActiveRun(cfg.data, sessionId, id);
+      hub.publish({
+        type: "run",
+        event: "started",
+        sessionId,
+        runId: id,
+        messageId: assistantMsgId,
+        session: sessionHubPayload(getSession(cfg.data, sessionId)),
+      });
 
       const updated = getSession(cfg.data, sessionId);
       const assistantMessage =
@@ -468,6 +748,7 @@ export function createApp(overrides = {}) {
         userMessage: userMsg,
         assistantMessage,
         run: { id, meta },
+        permissionDowngradedFrom: runOpts.permissionDowngradedFrom,
       });
     } catch (e) {
       const status = e.status || 500;
@@ -607,7 +888,9 @@ export function createApp(overrides = {}) {
         projectCwd: cwd,
         home: cfg.settingsHome || cfg.home,
       });
-      const runOpts = runOptionsFromBody(body, settings);
+      const runOpts = runOptionsFromBody(body, settings, {
+        remote: req.isRemoteClient,
+      });
       const { id, meta } = runs.startRun({
         wf,
         prompt: body.prompt ?? "",
@@ -622,7 +905,12 @@ export function createApp(overrides = {}) {
         resumeGrokSessionId: body.resumeGrokSessionId || null,
         chatSessionId: body.chatSessionId || null,
       });
-      res.status(201).json({ ok: true, id, meta });
+      res.status(201).json({
+        ok: true,
+        id,
+        meta,
+        permissionDowngradedFrom: runOpts.permissionDowngradedFrom,
+      });
     } catch (e) {
       const status = e.status || 500;
       log.warn("run.reject", { status, message: e.message });
@@ -637,6 +925,12 @@ export function createApp(overrides = {}) {
         res.status(result.status || 500).json({ error: result.error });
       }
     }
+  });
+
+  // Live session/run fan-out. Clients keep this open and attach to a
+  // run stream only when a turn starts on a chat they have open.
+  app.get("/api/events", (req, res) => {
+    hub.attach(res);
   });
 
   app.post("/api/runs/:id/cancel", (req, res) => {
@@ -662,6 +956,53 @@ export function createApp(overrides = {}) {
     const result = runs.reconcileStaleRuns();
     log.info("runs.reconcile", { count: result.reconciled.length });
     res.json(result);
+  });
+
+  // ── Remote pairing (loopback only — a phone must never read the token) ──
+  function requireLocal(req, res) {
+    if (req.isRemoteClient) {
+      res.status(403).json({ error: "pairing is available on this Mac only" });
+      return false;
+    }
+    return true;
+  }
+
+  function pairingPayload() {
+    const tailnetIp = detectTailnetAddress(os.networkInterfaces());
+    const record = cfg.remoteEnabled ? loadOrCreateToken(cfg.data) : null;
+    const host = tailnetIp || cfg.host;
+    return {
+      enabled: Boolean(cfg.remoteEnabled),
+      boundHost: cfg.host,
+      port: cfg.port,
+      tailnetIp,
+      // What the phone should be pointed at. Null when there is nothing
+      // reachable yet (remote off, or Tailscale not up on this Mac).
+      url:
+        cfg.remoteEnabled && tailnetIp ? `http://${tailnetIp}:${cfg.port}` : null,
+      token: record?.token || null,
+      createdAt: record?.createdAt || null,
+      allowedCidrs: remoteAllowedCidrs,
+      listeningOnTailnet: Boolean(tailnetIp) && cfg.host === tailnetIp,
+      hints: buildPairingHints(cfg, tailnetIp),
+    };
+  }
+
+  app.get("/api/remote/pairing", (req, res) => {
+    if (!requireLocal(req, res)) return;
+    res.json(pairingPayload());
+  });
+
+  app.post("/api/remote/rotate", (req, res) => {
+    if (!requireLocal(req, res)) return;
+    if (!cfg.remoteEnabled) {
+      res.status(400).json({ error: "remote access is not enabled" });
+      return;
+    }
+    rotateToken(cfg.data);
+    log.warn("remote.token_rotated", {});
+    // Existing devices are cut off until they re-pair; that is the point.
+    res.json({ ...pairingPayload(), rotated: true, restartRequired: true });
   });
 
   // ── Worktrees ────────────────────────────────────────────────────

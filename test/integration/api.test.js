@@ -615,6 +615,101 @@ exec "${process.execPath}" "${FAKE_GROK}" "$@"
     assert.ok(ctxBody.body.grokSessionId);
   });
 
+  it("compact 409s while a session run is still live", async () => {
+    process.env.FAKE_GROK_MODE = "slow";
+    process.env.FAKE_GROK_SLEEP_MS = "1500";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+    process.env.FAKE_GROK_MODE = "pong";
+    const primed = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "prime",
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    await waitForRun(ctx.base, primed.body.run.id);
+    process.env.FAKE_GROK_MODE = "slow";
+    const live = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "slow",
+        permissionMode: "bypassPermissions",
+        interactive: false,
+      }),
+    });
+    const blocked = await json(ctx.base, `/api/sessions/${sid}/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "nope" }),
+    });
+    assert.equal(blocked.res.status, 409);
+    await json(ctx.base, `/api/runs/${live.body.run.id}/cancel`, { method: "POST" });
+    process.env.FAKE_GROK_MODE = "pong";
+    delete process.env.FAKE_GROK_SLEEP_MS;
+  });
+
+  it("second interactive turn resumes the stored ACP session", async () => {
+    process.env.FAKE_GROK_MODE = "acp-permission";
+    const created = await json(ctx.base, "/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: ROOT, workflowId: "code-agent" }),
+    });
+    const sid = created.body.id;
+
+    async function turn(text) {
+      const msg = await json(ctx.base, `/api/sessions/${sid}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          cwd: ROOT,
+          permissionMode: "default",
+          interactive: true,
+        }),
+      });
+      assert.equal(msg.res.status, 201);
+      const perm = await waitForEvent(
+        ctx.base,
+        msg.body.run.id,
+        (e) => e.type === "studio" && e.event === "permission_request",
+      );
+      await json(ctx.base, `/api/runs/${msg.body.run.id}/permissions/${perm.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow: true, optionId: "allow-once" }),
+      });
+      return waitForRun(ctx.base, msg.body.run.id, 15000);
+    }
+
+    const first = await turn("first turn");
+    const acp1 = (first.events || []).find(
+      (e) => e.type === "studio" && e.event === "acp_session",
+    );
+    assert.ok(acp1, "first turn must emit acp_session");
+    assert.equal(acp1.resumed, false);
+    await new Promise((r) => setTimeout(r, 80));
+    const session = await json(ctx.base, `/api/sessions/${sid}`);
+    assert.equal(session.body.grokSessionId, acp1.sessionId);
+
+    const second = await turn("second turn");
+    const acp2 = (second.events || []).find(
+      (e) => e.type === "studio" && e.event === "acp_session",
+    );
+    assert.ok(acp2);
+    assert.equal(acp2.resumed, true);
+    assert.equal(acp2.sessionId, acp1.sessionId);
+    process.env.FAKE_GROK_MODE = "pong";
+  });
+
   it("stream replay honors after= seq", async () => {
     process.env.FAKE_GROK_MODE = "pong";
     const created = await json(ctx.base, "/api/sessions", {

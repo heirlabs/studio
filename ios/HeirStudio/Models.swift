@@ -409,6 +409,38 @@ struct ToolActivity: Identifiable, Sendable, Hashable {
     let detail: String
 }
 
+struct ModelInfo: Codable, Identifiable, Sendable, Hashable {
+    let id: String
+    let name: String?
+    let description: String?
+    let contextWindow: Int?
+    var displayName: String { name?.isEmpty == false ? name! : id }
+}
+
+struct ModelList: Codable, Sendable {
+    let models: [ModelInfo]
+}
+
+struct BudgetStatus: Codable, Sendable {
+    let spentUsd: Double?
+    let maxBudgetUsd: Double?
+    let remainingUsd: Double?
+    let turns: Int?
+}
+
+struct WorktreeInfo: Codable, Identifiable, Sendable, Hashable {
+    let name: String
+    let path: String?
+    let branch: String?
+    var id: String { name }
+}
+
+struct WorktreeList: Codable, Sendable {
+    let git: Bool?
+    let worktrees: [WorktreeInfo]
+    let cwd: String?
+}
+
 struct PendingPermission: Identifiable, Sendable, Equatable {
     let id: String
     let runId: String

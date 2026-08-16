@@ -379,6 +379,29 @@ actor StudioClient {
             as: CheckpointSummary.self)
     }
 
+    func listModels() async throws -> [ModelInfo] {
+        let list = try await send(request("/api/models"), as: ModelList.self)
+        return list.models
+    }
+
+    func budget(sessionId: String?) async throws -> BudgetStatus {
+        var items: [URLQueryItem] = []
+        if let sessionId {
+            items.append(URLQueryItem(name: "sessionId", value: sessionId))
+        }
+        let path = items.isEmpty ? "/api/budget" : Self.queryURL(path: "/api/budget", items: items)
+        return try await send(request(path), as: BudgetStatus.self)
+    }
+
+    func listWorktrees(cwd: String?) async throws -> WorktreeList {
+        var items: [URLQueryItem] = []
+        if let cwd {
+            items.append(URLQueryItem(name: "cwd", value: cwd))
+        }
+        let path = items.isEmpty ? "/api/worktrees" : Self.queryURL(path: "/api/worktrees", items: items)
+        return try await send(request(path), as: WorktreeList.self)
+    }
+
     func restoreCheckpoint(sessionId: String, checkpointId: String) async throws -> SessionDetail {
         let result = try await send(
             request(

@@ -15,6 +15,7 @@ struct ChatView: View {
     @State private var showMacPicker = false
     @State private var showGit = false
     @State private var showCheckpoints = false
+    @State private var showRunSettings = false
 
     init(sessionId: String, initialTitle: String) {
         self.sessionId = sessionId
@@ -39,6 +40,7 @@ struct ChatView: View {
                     }
                     .disabled(model.isRunning || model.compacting)
                     Button("Checkpoints") { showCheckpoints = true }
+                    Button("Model, budget, worktree") { showRunSettings = true }
                     if let percent = model.context?.percent {
                         Text("Context \(percent)%")
                     }
@@ -120,6 +122,9 @@ struct ChatView: View {
                 model.applyRestored(detail)
             }
         }
+        .sheet(isPresented: $showRunSettings) {
+            RunSettingsSheet(model: model)
+        }
     }
 
     private var transcript: some View {
@@ -132,13 +137,13 @@ struct ChatView: View {
                             thinkingExpanded: model.isRunning && message.id == model.messages.last?.id)
                             .id(message.id)
                     }
-                    if model.isRunning || model.toolCount > 0 {
+                    if model.isRunning || !model.tools.isEmpty {
                         ActivityStrip(
                             reconnecting: model.reconnecting,
                             isRunning: model.isRunning,
                             toolCount: model.toolCount,
                             lastTool: model.lastToolLabel,
-                            errors: model.tools.filter { $0.kind == .error }
+                            tools: model.tools
                         )
                         .id("tools")
                     }
@@ -369,7 +374,7 @@ struct ActivityStrip: View {
     let isRunning: Bool
     let toolCount: Int
     let lastTool: String?
-    let errors: [ToolActivity]
+    let tools: [ToolActivity]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -390,16 +395,30 @@ struct ActivityStrip: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            ForEach(errors) { tool in
-                Label(tool.detail.isEmpty ? tool.name : tool.detail, systemImage: "exclamationmark.triangle")
+            ForEach(tools.suffix(12)) { tool in
+                Label(tool.detail.isEmpty ? tool.name : tool.detail, systemImage: icon(for: tool.kind))
                     .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
+                    .foregroundStyle(tool.kind == .error ? Color.red : Color.secondary)
+                    .lineLimit(2)
+            }
+            if tools.count > 12 {
+                Text("\(tools.count - 12) earlier tools")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 10))
+    }
+
+    private func icon(for kind: ToolActivity.Kind) -> String {
+        switch kind {
+        case .call: "wrench"
+        case .result: "checkmark"
+        case .error: "exclamationmark.triangle"
+        case .note: "info.circle"
+        }
     }
 
     private var statusLine: String {

@@ -5,6 +5,7 @@ struct SessionListView: View {
     @State private var showSettings = false
     @State private var showProjectPicker = false
     @State private var newSession: SessionSummary?
+    @State private var showSearch = false
 
     var body: some View {
         NavigationStack {
@@ -64,6 +65,12 @@ struct SessionListView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button { showSearch = true } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel("Search chats")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showProjectPicker = true
                     } label: {
@@ -76,6 +83,7 @@ struct SessionListView: View {
                 await model.refreshHealth()
             }
             .sheet(isPresented: $showSettings) { ConnectionSettingsView() }
+            .sheet(isPresented: $showSearch) { HistorySearchView() }
             .sheet(isPresented: $showProjectPicker) {
                 ProjectPickerView { cwd in
                     newSession = await model.createSession(cwd: cwd)

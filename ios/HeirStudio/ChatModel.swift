@@ -22,6 +22,10 @@ final class ChatModel: ObservableObject {
     @Published var queuedText: String?
     @Published var context: SessionContext?
     @Published var compacting = false
+    @Published var selectedModel: String = ""
+    @Published var useWorktree = false
+    @Published var maxBudgetUsd: String = ""
+    @Published var reasoningEffort: String = "high"
 
     private let client: StudioClient
     let sessionId: String
@@ -154,13 +158,18 @@ final class ChatModel: ObservableObject {
                 let attached = macFiles.map { "Attached Mac file: \($0)" }.joined(separator: "\n")
                 prompt = prompt.isEmpty ? attached : prompt + "\n\n" + attached
             }
+            let budget = Double(maxBudgetUsd.trimmingCharacters(in: .whitespaces))
             let response = try await client.sendMessage(
                 sessionId: sessionId,
                 options: .init(
                     text: prompt,
                     permissionMode: permissionMode,
                     images: names.isEmpty ? nil : names,
-                    files: macFiles.isEmpty ? nil : macFiles))
+                    files: macFiles.isEmpty ? nil : macFiles,
+                    model: selectedModel.isEmpty ? nil : selectedModel,
+                    reasoningEffort: reasoningEffort,
+                    maxBudgetUsd: budget,
+                    worktree: useWorktree ? true : nil))
             messages = response.session.messages
             title = response.session.title ?? title
             cwd = response.session.cwd ?? cwd
@@ -339,6 +348,11 @@ final class ChatModel: ObservableObject {
 
         case ("tool_result", _):
             lastToolLabel = summarizeTool(event.name ?? "tool", event.result?.preview ?? "")
+            append(
+                ToolActivity(
+                    name: event.name ?? "tool",
+                    kind: .result,
+                    detail: summarizeTool(event.name ?? "tool", event.result?.preview ?? "")))
 
         case ("error", _):
             append(
@@ -491,10 +505,7 @@ final class ChatModel: ObservableObject {
     private func recordTool(name: String, detail: String) {
         toolCount += 1
         lastToolLabel = summarizeTool(name, detail)
-        // Keep errors only in the strip — raw shell dumps bury the thinking.
-        if name == "error" {
-            append(ToolActivity(name: name, kind: .error, detail: summarizeTool(name, detail)))
-        }
+        append(ToolActivity(name: name, kind: .call, detail: summarizeTool(name, detail)))
     }
 
     private func summarizeTool(_ name: String, _ detail: String) -> String {
@@ -515,8 +526,8 @@ final class ChatModel: ObservableObject {
 
     private func append(_ activity: ToolActivity) {
         tools.append(activity)
-        if tools.count > 8 {
-            tools.removeFirst(tools.count - 8)
+        if tools.count > 80 {
+            tools.removeFirst(tools.count - 80)
         }
     }
 

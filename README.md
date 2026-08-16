@@ -1,4 +1,4 @@
-# Grok Studio
+# Heir Studio
 
 Native **macOS coding app** (Electron) + local-only server for [Grok Build](https://github.com/xai-org/grok-build) (`grok`).
 
@@ -11,7 +11,7 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Permission modes | Shift+Tab cycles `default` → `acceptEdits` → `plan` → `auto` → `dontAsk` → `bypassPermissions` → passed as `--permission-mode` |
 | Multi-model | Model list from `~/.grok/models_cache.json`; selection rules; `-m` |
 | Extended thinking | Alt+T cycles effort / off → `--reasoning-effort` |
-| Keybindings | 17 contexts; multi-stroke chords; `~/.grok-studio/keybindings.json`; two hardcoded (`forceCancel`, `emergencyStop`) |
+| Keybindings | 17 contexts; multi-stroke chords; `~/.heir-studio/keybindings.json`; two hardcoded (`forceCancel`, `emergencyStop`) |
 | Transcript viewer | Ctrl+O; markdown export |
 | History search | Ctrl+R reverse search over user prompts |
 | Subagents | Agent defs from `.grok/agents/`, `~/.grok/agents/`, bundled; `--agent` |
@@ -21,7 +21,7 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Sandbox | `--sandbox` + allow/deny rules |
 | Checkpoints | Pre-run + manual snapshots; restore messages |
 | Providers | Gateway / API base URL → env for child `grok` |
-| Settings scopes | user (`~/.grok-studio/settings.json`) · project (`.grok-studio/settings.json`) · local (`data/settings.local.json`) |
+| Settings scopes | user (`~/.heir-studio/settings.json`) · project (`.heir-studio/settings.json`) · local (`data/settings.local.json`) |
 | Run reattach | Switch sessions mid-run; EventSource re-subscribes via `activeRunId` |
 | Tool stream UI | Live tool_call / tool_result / stderr cards with payload previews |
 | File attachments | Images **and** text/code files (`@path` into the prompt) |
@@ -45,11 +45,11 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 cd ~/grok-studio
 npm install
 npm run app          # launch desktop app (dev)
-npm run dist         # build Grok Studio.app → release/mac*/
+npm run dist         # build Heir Studio.app → release/mac*/
 npm run dist:dmg     # also produce a .dmg
 ```
 
-Open **`release/mac-arm64/Grok Studio.app`** (or `mac/` / `mac-x64/` depending on CPU).
+Open **`release/mac-arm64/Heir Studio.app`** (or `mac/` / `mac-x64/` depending on CPU).
 
 You can drag the `.app` into **Applications**. First launch may need right-click → Open (unsigned local build).
 
@@ -62,7 +62,7 @@ You can drag the `.app` into **Applications**. First launch may need right-click
 - Media fold for optional Imagine jobs
 - Drop images on the dock icon or into Attachments
 - **Finder** + right-click media outs → Reveal
-- Data: `~/Library/Application Support/grok-studio/data/`
+- Data: `~/Library/Application Support/heir-studio/data/`
 - Single-instance lock; ephemeral localhost port
 
 ## Browser mode (still works)
@@ -74,7 +74,7 @@ npm start
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `GROK_STUDIO_PORT` | `3847` | Browser-mode listen port |
+| `HEIR_STUDIO_PORT` | `3847` | Browser-mode listen port |
 | `GROK_BIN` | auto-detect | Path to `grok` |
 
 ## Architecture
@@ -153,8 +153,14 @@ Edit `workflows/catalog.json` to add templates (`{{prompt}}`, `{{images}}`, `{{#
 | Ctrl+/ | Keybindings help |
 | Ctrl+N | New session |
 | Ctrl+Shift+C | Checkpoints |
+| Ctrl+1…3 | Jump to session 1–3 |
+| ↑ / ↓ | Recall previous / next prompt in the composer |
+| Escape | Deny a permission prompt · close a modal · stop a run |
 
-Customize: `~/.grok-studio/keybindings.json` (or `data/keybindings.json`).
+Customize: `~/.heir-studio/keybindings.json` (or `data/keybindings.json`).
+
+Bindings are scoped by `when` context; the most specific active context wins, so
+Escape on a permission prompt denies that request rather than stopping the run.
 
 ## Tests
 
@@ -162,8 +168,13 @@ Customize: `~/.grok-studio/keybindings.json` (or `data/keybindings.json`).
 npm test
 ```
 
-- **Unit**: template, media, config, permissions, keybindings (incl. chord sequences), models, settings, budget (daily + session turns), sandbox, agents, checkpoints, background, ssh, providers, `buildGrokArgs`, sessions (attach/fail/restore/history order), `resolveProjectCwd`
-- **Integration**: HTTP on ephemeral port, real multer uploads, fake-grok child for pong/image/session-image/cancel/concurrency, budget 429, invalid permission marks assistant error, keybindings validation, provider, agents CRUD, model select — **no mocks of app code**
+- **Unit**: template, media, config, permissions, keybindings (incl. chord sequences), models, settings layering, budget (daily + session turns, ledger corruption recovery), sandbox, agents, checkpoints, background, ssh (quoting proved by a real `/bin/sh` round-trip), providers, `buildGrokArgs`, `buildAcpArgs`, `normalizeStreamEvent`, `decidePermission`, sessions (attach/fail/restore/history order), `resolveProjectCwd`
+- **Integration**: HTTP on ephemeral port, real multer uploads, fake-grok child for pong/image/session-image/cancel/concurrency, budget 429, keybindings validation, provider, agents CRUD, model select, worktree-isolated run, spawn-failure finalization, and the full ACP matrix (allow / deny / acceptEdits auto-approve / read-only auto-deny / turn failure) — **no mocks of app code**
+
+The fake grok fixture emits the **same wire shapes as the real CLI** (verified
+against grok 0.2.117): `tool_call` with `title` / `toolName` / `rawInput`,
+results as title-less `tool_call_update`, and `available_commands` noise. Tests
+that pass against a friendlier invented shape prove nothing.
 
 ## Safety / ops
 
@@ -183,8 +194,11 @@ npm test
 - **Budget USD** is a local estimate (`$0.05`/turn default when no `total_cost_usd` on `end`); pre-spawn gate + mid-run kill on tool turns. Not a substitute for xAI billing
 - **SSH remote runs** use `scp` + `ssh` BatchMode; stay on headless transport (no ACP over SSH yet); live connectivity is not CI-tested
 - **Subagents** are Grok’s own `spawn_subagent` / `--agent` profiles — Studio surfaces definitions and flags, does not reimplement the agent loop
-- **`forwardSubagentText`** is a settings field for parity only; Grok CLI has no `--forward-subagent-text` flag
 - **Interactive approvals** use ACP for `default` / `acceptEdits` only; `bypassPermissions` / `plan` / `auto` / `dontAsk` stay on headless streaming-json
+- **`acceptEdits`** auto-approves `edit` / `read` / `search` tool calls and still prompts for `execute` / `fetch`. Dismissing a prompt (Escape, backdrop, ×) **denies** it — leaving it unanswered would stall the turn
+- **Plan mode** enforcement is the CLI’s (`--permission-mode plan`); Studio’s own policy layer only guards the ACP approval path (e.g. a `read-only` sandbox auto-denies writes)
+- **Provider routing** passes the documented `--xai-api-base-url` / `--cli-chat-proxy-base-url` flags on the ACP transport. The headless top-level command has no such flags, so there it is env-var best-effort only
+- **Tool events** are normalized server-side to `{name, input}` / `{name, result}`; `tool_call_update` has no title, so results are correlated to their call by `toolCallId`. `available_commands` (~15KB × ~4 per run) is dropped rather than logged and streamed
 - **Screen control** (OS-level UI automation) is out of scope for this app
 - **Agent loop** is the real Grok CLI process (headless or ACP); Studio is the desktop shell + orchestration
 
@@ -195,4 +209,4 @@ npm test
 | Health red | `grok login` or set `XAI_API_KEY`; check `GROK_BIN` |
 | 429 on Run | Wait for active runs or raise concurrency in `createConfig` |
 | Empty gallery | Agent must produce files; check `data/runs/<id>/events.jsonl` and session `images/` |
-| Port in use | `GROK_STUDIO_PORT=3848 npm start` |
+| Port in use | `HEIR_STUDIO_PORT=3848 npm start` |

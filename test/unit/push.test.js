@@ -129,13 +129,11 @@ describe("sendPush", () => {
 describe("resolveApnsConfig", () => {
   it("returns null when no key file exists", () => {
     const cfg = resolveApnsConfig({
+      HEIR_STUDIO_APNS_CERT_PATH: "/no/such.crt",
+      HEIR_STUDIO_APNS_TLS_KEY_PATH: "/no/such.key",
       HEIR_STUDIO_APNS_KEY_PATH: "/no/such/AuthKey_NONE.p8",
     });
-    // Falls through to the default candidate paths; those may exist on this Mac.
-    if (!fs.existsSync("/Users/futjr/.appstoreconnect/private_keys/AuthKey_629PDCXMGR.p8") &&
-        !fs.existsSync("/Users/futjr/Downloads/Certificates/AuthKey_XN32LKUVMM.p8")) {
-      assert.equal(cfg, null);
-    }
+    assert.equal(cfg, null);
   });
 
   it("reads key id from the filename and honours production host", () => {
@@ -143,12 +141,33 @@ describe("resolveApnsConfig", () => {
     const keyPath = path.join(dir, "AuthKey_ABCDEF1234.p8");
     fs.writeFileSync(keyPath, "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n");
     const cfg = resolveApnsConfig({
+      HEIR_STUDIO_APNS_CERT_PATH: "/no/such.crt",
+      HEIR_STUDIO_APNS_TLS_KEY_PATH: "/no/such.key",
       HEIR_STUDIO_APNS_KEY_PATH: keyPath,
       HEIR_STUDIO_APNS_PRODUCTION: "1",
     });
+    assert.equal(cfg.auth, "token");
     assert.equal(cfg.keyPath, keyPath);
     assert.equal(cfg.keyId, "ABCDEF1234");
     assert.equal(cfg.teamId, "2Y8MR5FHTC");
+    assert.equal(cfg.bundleId, "com.heir.studio.mobile");
+    assert.equal(cfg.production, true);
+    assert.equal(cfg.host, "api.push.apple.com");
+  });
+
+  it("prefers the App ID TLS cert when the PEM pair is present", () => {
+    const dir = tmpData();
+    const certPath = path.join(dir, "aps.crt.pem");
+    const tlsKeyPath = path.join(dir, "aps.key");
+    fs.writeFileSync(certPath, "-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n");
+    fs.writeFileSync(tlsKeyPath, "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n");
+    const cfg = resolveApnsConfig({
+      HEIR_STUDIO_APNS_CERT_PATH: certPath,
+      HEIR_STUDIO_APNS_TLS_KEY_PATH: tlsKeyPath,
+    });
+    assert.equal(cfg.auth, "cert");
+    assert.equal(cfg.certPath, certPath);
+    assert.equal(cfg.tlsKeyPath, tlsKeyPath);
     assert.equal(cfg.bundleId, "com.heir.studio.mobile");
     assert.equal(cfg.production, true);
     assert.equal(cfg.host, "api.push.apple.com");

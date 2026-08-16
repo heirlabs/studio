@@ -135,7 +135,3 @@ export function listBackgroundJobs(dataDir, { status } = {}) {
   if (status) jobs = jobs.filter((j) => j.status === status);
   return jobs;
 }
-
-export function getBackgroundJob(dataDir, runId) {
-  return listBackgroundJobs(dataDir).find((j) => j.runId === runId) || null;
-}

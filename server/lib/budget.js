@@ -26,15 +26,35 @@ function emptyLedger() {
   };
 }
 
+/**
+ * Read the ledger. A truncated file (killed mid-write by an older build, or by
+ * a full disk) must not permanently wedge every future run on a parse error —
+ * quarantine it and start clean.
+ */
 export function loadLedger(dataDir) {
   const p = ledgerPath(dataDir);
   if (!fs.existsSync(p)) return emptyLedger();
-  return JSON.parse(fs.readFileSync(p, "utf8"));
+  const raw = fs.readFileSync(p, "utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      days: parsed.days || {},
+      sessions: parsed.sessions || {},
+      runs: parsed.runs || {},
+    };
+  } catch {
+    fs.renameSync(p, `${p}.corrupt-${Date.now()}`);
+    return emptyLedger();
+  }
 }
 
+/** Atomic write — a crash mid-save leaves the previous ledger intact. */
 export function saveLedger(dataDir, ledger) {
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(ledgerPath(dataDir), JSON.stringify(ledger, null, 2));
+  const p = ledgerPath(dataDir);
+  const tmp = `${p}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2));
+  fs.renameSync(tmp, p);
 }
 
 function ensureDay(ledger, day) {

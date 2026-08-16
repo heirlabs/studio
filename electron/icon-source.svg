@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <!-- Official HEIR geometric mark, red on black. Path from marketing/creatives/brand/heir-mark-gold.svg -->
+  <rect width="1000" height="1000" fill="#000000"/>
+  <g transform="translate(100,100) scale(0.8)">
+    <path d="M170.0,280.0 L280.0,280.0 L280.0,170.0 L390.0,170.0 L390.0,60.0 L610.0,60.0 L610.0,170.0 L720.0,170.0 L720.0,280.0 L830.0,280.0 L830.0,390.0 L940.0,390.0 L940.0,610.0 L830.0,610.0 L830.0,720.0 L720.0,720.0 L720.0,830.0 L610.0,830.0 L610.0,940.0 L390.0,940.0 L390.0,830.0 L280.0,830.0 L280.0,720.0 L170.0,720.0 L170.0,610.0 L60.0,610.0 L60.0,390.0 L170.0,390.0 Z"
+          fill="none" stroke="#E10600" stroke-width="82" stroke-linejoin="miter"/>
+  </g>
+</svg>

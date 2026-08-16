@@ -41,11 +41,12 @@ export function captureGitState(cwd) {
       return null;
     }
   };
+  const status = run(["status", "--porcelain"]);
   return {
     head: run(["rev-parse", "HEAD"]),
     branch: run(["rev-parse", "--abbrev-ref", "HEAD"]),
-    status: run(["status", "--porcelain"]),
-    dirty: Boolean(run(["status", "--porcelain"])),
+    status,
+    dirty: Boolean(status),
   };
 }
 

@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("grokStudioNative", {
+contextBridge.exposeInMainWorld("heirStudioNative", {
   isNative: true,
   platform: process.platform,
   openImages: () => ipcRenderer.invoke("studio:open-images"),

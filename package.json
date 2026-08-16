@@ -1,5 +1,5 @@
 {
-  "name": "grok-studio",
+  "name": "heir-studio",
   "version": "1.7.0",
   "description": "Native macOS coding agent for Grok Build — multi-session chat, permission modes, keybindings, SSH, subagents, checkpoints",
   "private": true,
@@ -19,7 +19,8 @@
     "test": "node --test --test-concurrency=1 test/unit/*.test.js test/integration/*.test.js",
     "test:unit": "node --test --test-concurrency=1 test/unit/*.test.js",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.js",
-    "audit": "npm audit --omit=dev"
+    "audit": "npm audit --omit=dev",
+    "tunnel": "node scripts/tunnel.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -33,8 +34,8 @@
     "electron-builder": "26.0.12"
   },
   "build": {
-    "appId": "com.local.grok-studio",
-    "productName": "Grok Studio",
+    "appId": "com.heir.studio",
+    "productName": "Heir Studio",
     "copyright": "Local use only",
     "directories": {
       "output": "release",
@@ -57,7 +58,10 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "electron/icon.icns",
-      "target": ["dir", "dmg"],
+      "target": [
+        "dir",
+        "dmg"
+      ],
       "darkModeSupport": true,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
@@ -81,7 +85,7 @@
       }
     },
     "dmg": {
-      "title": "Grok Studio"
+      "title": "Heir Studio"
     },
     "asar": true
   }

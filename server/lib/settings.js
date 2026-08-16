@@ -1,8 +1,8 @@
 /**
  * Layered settings: defaults < user < project < local (session data).
  * Scopes:
- *   user    → ~/.grok-studio/settings.json
- *   project → <projectCwd>/.grok-studio/settings.json
+ *   user    → ~/.heir-studio/settings.json
+ *   project → <projectCwd>/.heir-studio/settings.json
  *   local   → <dataDir>/settings.local.json
  */
 import fs from "fs";
@@ -25,8 +25,6 @@ export const DEFAULT_SETTINGS = {
   denyRules: [],
   disableWebSearch: false,
   noSubagents: false,
-  // Reserved: Grok CLI has no --forward-subagent-text; kept for UI/settings parity
-  forwardSubagentText: false,
   agent: null,
   provider: {
     gatewayUrl: null,
@@ -71,12 +69,12 @@ function deepMerge(base, patch) {
 }
 
 export function userSettingsPath(home = os.homedir()) {
-  return path.join(home, ".grok-studio", "settings.json");
+  return path.join(home, ".heir-studio", "settings.json");
 }
 
 export function projectSettingsPath(projectCwd) {
   if (!projectCwd) return null;
-  return path.join(projectCwd, ".grok-studio", "settings.json");
+  return path.join(projectCwd, ".heir-studio", "settings.json");
 }
 
 export function localSettingsPath(dataDir) {
@@ -177,8 +175,6 @@ export function validateSettingsPatch(patch) {
   if (patch.disableWebSearch != null)
     out.disableWebSearch = Boolean(patch.disableWebSearch);
   if (patch.noSubagents != null) out.noSubagents = Boolean(patch.noSubagents);
-  if (patch.forwardSubagentText != null)
-    out.forwardSubagentText = Boolean(patch.forwardSubagentText);
   if (patch.agent != null) out.agent = String(patch.agent).trim() || null;
   if (patch.provider != null) {
     if (typeof patch.provider !== "object") {

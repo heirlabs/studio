@@ -1,4 +1,4 @@
-export function createLogger(prefix = "grok-studio") {
+export function createLogger(prefix = "heir-studio") {
   const ts = () => new Date().toISOString();
   return {
     info: (...args) => console.log(`[${ts()}] [${prefix}]`, ...args),

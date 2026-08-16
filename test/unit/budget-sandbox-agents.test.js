@@ -1,5 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { providerToAgentCliArgs } from "../../server/lib/providers.js";
+import { buildAcpArgs } from "../../server/lib/acp-client.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -452,5 +454,66 @@ describe("run reconcile", () => {
     );
     assert.equal(meta.status, "aborted");
     fs.rmSync(data, { recursive: true, force: true });
+  });
+});
+
+describe("provider routing", () => {
+  it("emits the documented grok agent flags for a gateway", () => {
+    const args = providerToAgentCliArgs({ gatewayUrl: "https://gw.example.com/" });
+    assert.deepEqual(args, [
+      "--xai-api-base-url",
+      "https://gw.example.com",
+      "--cli-chat-proxy-base-url",
+      "https://gw.example.com",
+    ]);
+  });
+
+  it("lets specific base URLs win over the gateway", () => {
+    const args = providerToAgentCliArgs({
+      gatewayUrl: "https://gw.example.com",
+      xaiApiBaseUrl: "https://api.example.com",
+    });
+    assert.equal(args[args.indexOf("--xai-api-base-url") + 1], "https://api.example.com");
+    assert.equal(
+      args[args.indexOf("--cli-chat-proxy-base-url") + 1],
+      "https://gw.example.com",
+    );
+  });
+
+  it("emits nothing when unconfigured", () => {
+    assert.deepEqual(providerToAgentCliArgs({}), []);
+    assert.deepEqual(providerToAgentCliArgs(null), []);
+  });
+
+  it("rejects a non-http provider URL rather than passing it through", () => {
+    assert.throws(
+      () => providerToAgentCliArgs({ gatewayUrl: "file:///etc/passwd" }),
+      /http\(s\) URL/,
+    );
+  });
+});
+
+describe("acp argv", () => {
+  it("puts options before the stdio subcommand", () => {
+    assert.deepEqual(
+      buildAcpArgs({ alwaysApprove: true, model: "grok-4.5" }),
+      ["agent", "--always-approve", "-m", "grok-4.5", "--no-leader", "stdio"],
+    );
+  });
+
+  it("omits always-approve for interactive modes and appends provider flags", () => {
+    const args = buildAcpArgs({
+      alwaysApprove: false,
+      model: null,
+      extraArgs: ["--xai-api-base-url", "https://x"],
+    });
+    assert.deepEqual(args, [
+      "agent",
+      "--xai-api-base-url",
+      "https://x",
+      "--no-leader",
+      "stdio",
+    ]);
+    assert.equal(args[args.length - 1], "stdio");
   });
 });

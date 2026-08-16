@@ -1,6 +1,6 @@
 /**
  * Context-aware keybinding system (Claude Desktop–style).
- * Config: ~/.grok-studio/keybindings.json or studio data/keybindings.json
+ * Config: ~/.heir-studio/keybindings.json or studio data/keybindings.json
  *
  * 17 contexts control when a binding is active.
  * Two actions are hardcoded and cannot be rebound: forceCancel, emergencyStop.
@@ -56,6 +56,7 @@ export const DEFAULT_KEYBINDINGS = [
   { key: "ctrl+p", command: "historyPrev", when: "historySearch" },
   { key: "ctrl+n", command: "historyNext", when: "historySearch" },
   { key: "enter", command: "historyAccept", when: "historySearch" },
+  { key: "escape", command: "denyPermission", when: "permissionPrompt" },
   { key: "escape", command: "closeModal", when: "modal" },
   { key: "escape", command: "closeModal", when: "transcriptViewer" },
   { key: "escape", command: "closeModal", when: "historySearch" },
@@ -66,7 +67,7 @@ export const DEFAULT_KEYBINDINGS = [
 ];
 
 export function defaultKeybindingsPath(home = os.homedir()) {
-  return path.join(home, ".grok-studio", "keybindings.json");
+  return path.join(home, ".heir-studio", "keybindings.json");
 }
 
 /**

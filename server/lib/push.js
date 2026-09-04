@@ -20,11 +20,6 @@ export const PUSH_CATEGORY = {
   RUN: "HEIR_RUN",
 };
 
-export const DEFAULT_APNS_KEY_PATHS = [
-  "/Users/futjr/.appstoreconnect/private_keys/AuthKey_629PDCXMGR.p8",
-  "/Users/futjr/Downloads/Certificates/AuthKey_XN32LKUVMM.p8",
-];
-
 export const DEFAULT_APNS_CERT_PATH = path.join(
   REPO_CERTS,
   "apns-heir-studio.crt.pem",
@@ -34,8 +29,6 @@ export const DEFAULT_APNS_TLS_KEY_PATH = path.join(
   "apns-heir-studio.key",
 );
 
-export const DEFAULT_APNS_KEY_ID = "629PDCXMGR";
-export const DEFAULT_APNS_TEAM_ID = "2Y8MR5FHTC";
 export const DEFAULT_APNS_BUNDLE_ID = "com.heir.studio.mobile";
 export const DEFAULT_APNS_SANDBOX_HOST = "api.sandbox.push.apple.com";
 export const DEFAULT_APNS_PRODUCTION_HOST = "api.push.apple.com";
@@ -143,22 +136,20 @@ export function resolveApnsConfig(env = process.env) {
     };
   }
 
-  const keyPath =
-    env.HEIR_STUDIO_APNS_KEY_PATH != null
-      ? firstExisting(env.HEIR_STUDIO_APNS_KEY_PATH)
-      : firstExisting(...DEFAULT_APNS_KEY_PATHS);
+  const keyPath = firstExisting(env.HEIR_STUDIO_APNS_KEY_PATH);
   if (!keyPath) return null;
 
   const fromName = path.basename(keyPath).match(/AuthKey_([A-Z0-9]+)\.p8$/i);
+  const keyId = env.HEIR_STUDIO_APNS_KEY_ID || (fromName && fromName[1]) || null;
+  const teamId = env.HEIR_STUDIO_APNS_TEAM_ID || null;
+  if (!keyId || !teamId) return null;
+
   const production = env.HEIR_STUDIO_APNS_PRODUCTION === "1";
   return {
     auth: "token",
     keyPath,
-    keyId:
-      env.HEIR_STUDIO_APNS_KEY_ID ||
-      (fromName && fromName[1]) ||
-      DEFAULT_APNS_KEY_ID,
-    teamId: env.HEIR_STUDIO_APNS_TEAM_ID || DEFAULT_APNS_TEAM_ID,
+    keyId,
+    teamId,
     bundleId,
     production,
     host:

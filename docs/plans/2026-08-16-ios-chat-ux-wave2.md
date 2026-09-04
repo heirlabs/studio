@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Session stays on this Mac. Tunnel `studio.heir.es` or Tailscale. **Do not Railway-up the agent.**
+- Session stays on this Mac. Tunnel or Tailscale. **Do not Railway-up the agent.**
 - Compact and rewind must hit Grok, not a local UI summary.
 - Remote clients cannot inherit `bypassPermissions`.
 - No AI attribution in commits. Do not commit `.env`, certs, pairing files.

@@ -1,10 +1,85 @@
 # Heir Studio
 
-Native **macOS coding app** (Electron) + local-only server for [Grok Build](https://github.com/xai-org/grok-build) (`grok`).
+[![CI](https://github.com/heirlabs/studio/actions/workflows/ci.yml/badge.svg)](https://github.com/heirlabs/studio/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Primary job: software engineering** — open a project folder, pick a coding workflow (agent, review, fix, implement, tests…), run real headless `grok` with tools (edit, shell, search). Screenshots/mocks are optional attachments; media workflows live under a secondary panel.
+Native **macOS coding app** (Electron) plus a local-only server for
+[Grok Build](https://github.com/xai-org/grok-build) (`grok`). An optional
+[iOS companion](ios/README.md) talks to the same Mac over Tailscale or a
+Cloudflare Tunnel.
 
-Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
+**Primary job: software engineering.** Open a project folder, pick a coding
+workflow (agent, review, fix, implement, tests), and run real headless `grok`
+with tools (edit, shell, search). Screenshots and mocks are optional
+attachments. Media workflows live under a secondary panel.
+
+The server binds to `127.0.0.1` by default. Non-loopback clients get `403`
+unless you opt into remote access.
+
+[Contributing](CONTRIBUTING.md) · [Architecture](docs/architecture.md) ·
+[Environment](docs/environment.md) · [Security](SECURITY.md) ·
+[Code of Conduct](CODE_OF_CONDUCT.md)
+
+## Requirements
+
+- macOS 12+ (desktop app). Node-only server and tests also run on Linux CI.
+- Node.js 18+
+- Grok Build CLI authenticated (`grok` on `PATH` or `~/.grok/bin/grok`)
+- The same credentials you already use for the TUI (`grok login` or `XAI_API_KEY`)
+
+## Quick start
+
+```bash
+git clone https://github.com/heirlabs/studio.git
+cd studio
+npm install
+npm test
+npm run app          # desktop window
+```
+
+Or run the UI in a browser:
+
+```bash
+npm start
+# → http://127.0.0.1:3847
+```
+
+Then:
+
+1. Open a **project folder** (⌘O). Coding runs use that directory as cwd.
+2. Pick a workflow (Code Agent is the default).
+3. Type a task and run. Shift+Tab cycles permission modes.
+
+Health in the UI stays red until `grok` is on `PATH` and logged in. Set
+`GROK_BIN` if the binary lives somewhere unusual.
+
+## Build the macOS app
+
+```bash
+npm install
+npm run dist         # Heir Studio.app → release/mac*/
+npm run dist:dmg     # also produce a .dmg
+```
+
+Open `release/mac-arm64/Heir Studio.app` (or `mac/` / `mac-x64/` depending on
+CPU). Drag the `.app` into **Applications** if you want. First launch of an
+unsigned local build may need right-click → Open.
+
+| Script | What it does |
+|--------|----------------|
+| `npm start` | Loopback server on port `3847` |
+| `npm run dev` | Same, restarted on file change |
+| `npm run app` | Electron; attaches to `:3847` if that server is already up |
+| `npm run dist` | Packaged `.app` |
+| `npm run dist:dmg` | Packaged `.app` + `.dmg` |
+| `npm test` | Unit + integration (fake grok, no network) |
+| `npm run tunnel` | Server + Cloudflare Tunnel with token required on every request |
+
+Packaged-app data lives at
+`~/Library/Application Support/heir-studio/data/`. Dev / `npm start` data
+lives in `./data/` (gitignored).
+
+## Desktop features
 
 | Feature | How |
 |---------|-----|
@@ -15,12 +90,13 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Transcript viewer | Ctrl+O; markdown export |
 | History search | Ctrl+R reverse search over user prompts |
 | Subagents | Agent defs from `.grok/agents/`, `~/.grok/agents/`, bundled; `--agent` |
-| SSH remote | Connection profiles; scp prompt + `ssh` run of remote `grok` |
+| SSH remote | Connection profiles; `scp` of the prompt + `ssh` run of remote `grok` |
 | Background runs | Job ledger + notification hooks (Electron `Notification`) |
 | Budget / turns | `--max-turns`; daily USD cap (local ledger estimates) |
 | Sandbox | `--sandbox` + allow/deny rules |
 | Checkpoints | Pre-run + manual snapshots; restore messages |
-| Providers | Gateway / API base URL → env for child `grok` |
+| Rewind / compact | Jump back in a session; shrink context when a turn gets huge |
+| Providers | Gateway / API base URL → flags or env for child `grok` |
 | Settings scopes | user (`~/.heir-studio/settings.json`) · project (`.heir-studio/settings.json`) · local (`data/settings.local.json`) |
 | Run reattach | Switch sessions mid-run; EventSource re-subscribes via `activeRunId` |
 | Tool stream UI | Live tool_call / tool_result / stderr cards with payload previews |
@@ -30,115 +106,45 @@ Desktop-agent features (Claude Desktop–style, mapped to Grok CLI):
 | Mid-run budget | Kill run when day spend + est. turns exceed `maxBudgetUsd` |
 | Worktree isolation | Optional git worktree per run (`worktree` checkbox) |
 
-**Binds only to `127.0.0.1`.** Non-loopback clients get `403`.
+Native extras in the `.app`: dock icon, ⌘O project picker, drop images on the
+dock, Finder reveal for outputs, single-instance lock.
 
-## Requirements
+## iOS companion
 
-- macOS 12+
-- Node.js 18+ (for build / browser mode)
-- Grok Build CLI authenticated (`grok` on PATH or `~/.grok/bin/grok`)
-- Same credentials you already use for the TUI (`grok login` or `XAI_API_KEY`)
-
-## macOS app (recommended)
-
-```bash
-cd ~/grok-studio
-npm install
-npm run app          # launch desktop app (dev)
-npm run dist         # build Heir Studio.app → release/mac*/
-npm run dist:dmg     # also produce a .dmg
-```
-
-Open **`release/mac-arm64/Heir Studio.app`** (or `mac/` / `mac-x64/` depending on CPU).
-
-You can drag the `.app` into **Applications**. First launch may need right-click → Open (unsigned local build).
-
-**Native features**
-
-- Real window + dock icon (not a browser tab)
-- **⌘O** → Open **Project** folder (required cwd for coding runs)
-- **⌘⇧O** → Attach screenshots/mocks (optional)
-- Coding workflows first: Code Agent, Review Diff, Fix Bug, Implement, Refactor, Tests, Explain, PR/Range
-- Media fold for optional Imagine jobs
-- Drop images on the dock icon or into Attachments
-- **Finder** + right-click media outs → Reveal
-- Data: `~/Library/Application Support/heir-studio/data/`
-- Single-instance lock; ephemeral localhost port
-
-## Browser mode (still works)
+Prompt the Mac from your phone: live token/tool stream, Allow/Deny, cancel,
+git, files. The phone reaches the Mac over Tailscale or a Cloudflare Tunnel.
+Every request carries a bearer token. A tunneled run cannot inherit
+`bypassPermissions`.
 
 ```bash
-npm start
-# → http://127.0.0.1:3847
+npm run tunnel       # recommended public path (token required, even on loopback)
+# or
+HEIR_STUDIO_REMOTE=1 HEIR_STUDIO_HOST=100.x.y.z npm start
 ```
 
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `HEIR_STUDIO_PORT` | `3847` | Browser-mode listen port |
-| `GROK_BIN` | auto-detect | Path to `grok` |
-
-## Architecture
-
-```
-server/
-  index.js          # listen + shutdown
-  app.js            # createApp() — used by tests
-  lib/
-    config.js       # paths, loopback, uuid, grok bin
-    catalog.js      # workflow catalog + rhai scan
-    template.js     # prompt template + safeName
-    media.js        # list/copy/harvest session + text
-    runs.js         # spawn grok, SSE, cancel, concurrency, CLI flags
-    sessions.js     # multi-tab chat + history search + restore
-    permissions.js  # mode cycle + CLI mapping
-    models.js       # catalog + selection rules
-    keybindings.js  # 17 contexts + load/save/resolve
-    settings.js     # user / project / local layers
-    agents.js       # agent definition discovery
-    ssh.js          # remote profiles + scp/ssh spawn
-    checkpoints.js  # session snapshots
-    budget.js       # daily spend + turn accounting
-    sandbox.js      # profiles + tool policy
-    background.js   # background jobs + notification hooks
-    providers.js    # gateway env routing
-    projects.js     # recent project cwd
-    logger.js
-public/             # static UI (chat, modals, shortcuts)
-electron/           # native shell + notifications
-workflows/catalog.json
-test/
-  unit/             # pure + filesystem tests
-  integration/      # real HTTP + fake-grok child process
-  fixtures/fake-grok.mjs
-data/
-  uploads/ outputs/ runs/<uuid>/ chat-sessions/ checkpoints/
-```
-
-Each run:
-
-1. Optional pre-run checkpoint of the chat session
-2. Stages selected images into `data/runs/<id>/`
-3. Writes `prompt.txt` with `@/abs/path` attachments + workflow template
-4. Builds CLI args (`--permission-mode`, `-m`, `--max-turns`, `--sandbox`, `--agent`, …)
-5. Spawns local `grok` or remote `ssh … grok` with streaming-json
-6. Streams NDJSON → SSE clients; appends `events.jsonl`
-7. On exit: harvest media, record budget usage, finish background job hooks
+Full setup, threat model, and Xcode build: [ios/README.md](ios/README.md).
 
 ## Workflows
 
-| ID | Needs images | Real tools instructed |
-|----|--------------|------------------------|
-| Image Edit | ≥1 | `image_edit` |
-| Image Generate | 0 | `image_gen` |
-| Image → Video | ≥1 | `image_to_video` |
-| Multi-ref Video | ≥2 | compose + animate |
-| Character Sheet | 0+ | gen + edit consistency |
-| Style Transfer | ≥2 | multi-ref `image_edit` |
-| Game Sprite / UI | 0+ | game asset skills |
-| Freeform Agent | 0+ | full agent |
-| Saved Rhai Workflow | 0+ | `workflow` tool |
+Coding first. Media is optional.
 
-Edit `workflows/catalog.json` to add templates (`{{prompt}}`, `{{images}}`, `{{#if images}}…{{/if}}`).
+| ID | Needs images | What it instructs grok to do |
+|----|--------------|------------------------------|
+| Code Agent | 0 | Edit, run, test, search in the project cwd |
+| Review Diff | 0 | Review `git diff` / staged / a named range |
+| Fix Bug | 0 | Reproduce, patch, verify |
+| Implement | 0 | Feature end-to-end |
+| Refactor | 0 | Structure without behavior change |
+| Tests | 0 | Add or fix real tests |
+| Explain | 0 | Read-only tour |
+| PR / Range | 0 | Branch or commit-range review |
+| Saved Workflow | 0 | Launch a `.rhai` workflow by name |
+| Image Edit | ≥1 | `image_edit` |
+| Image Gen | 0 | `image_gen` |
+| Image → Video | ≥1 | `image_to_video` |
+
+Edit `workflows/catalog.json` to add templates (`{{prompt}}`, `{{images}}`,
+`{{cwd}}`, `{{#if images}}…{{/if}}`).
 
 ## Shortcuts (defaults)
 
@@ -159,8 +165,9 @@ Edit `workflows/catalog.json` to add templates (`{{prompt}}`, `{{images}}`, `{{#
 
 Customize: `~/.heir-studio/keybindings.json` (or `data/keybindings.json`).
 
-Bindings are scoped by `when` context; the most specific active context wins, so
-Escape on a permission prompt denies that request rather than stopping the run.
+Bindings are scoped by `when` context. The most specific active context wins,
+so Escape on a permission prompt denies that request rather than stopping the
+run.
 
 ## Tests
 
@@ -168,15 +175,24 @@ Escape on a permission prompt denies that request rather than stopping the run.
 npm test
 ```
 
-- **Unit**: template, media, config, permissions, keybindings (incl. chord sequences), models, settings layering, budget (daily + session turns, ledger corruption recovery), sandbox, agents, checkpoints, background, ssh (quoting proved by a real `/bin/sh` round-trip), providers, `buildGrokArgs`, `buildAcpArgs`, `normalizeStreamEvent`, `decidePermission`, sessions (attach/fail/restore/history order), `resolveProjectCwd`
-- **Integration**: HTTP on ephemeral port, real multer uploads, fake-grok child for pong/image/session-image/cancel/concurrency, budget 429, keybindings validation, provider, agents CRUD, model select, worktree-isolated run, spawn-failure finalization, and the full ACP matrix (allow / deny / acceptEdits auto-approve / read-only auto-deny / turn failure) — **no mocks of app code**
+- **Unit**: template, media, config, permissions, keybindings (including chord
+  sequences), models, settings layering, budget, sandbox, agents, checkpoints,
+  background, ssh quoting (real `/bin/sh` round-trip), providers,
+  `buildGrokArgs`, `buildAcpArgs`, `normalizeStreamEvent`, `decidePermission`,
+  sessions, rewind, compact, remote auth, tunnel plan, APNs config,
+  `resolveProjectCwd`
+- **Integration**: HTTP on an ephemeral port, real multer uploads, fake-grok
+  child for pong / image / session-image / cancel / concurrency, budget 429,
+  keybindings validation, provider, agents CRUD, model select, worktree run,
+  spawn-failure finalization, and the ACP matrix (allow / deny / acceptEdits
+  auto-approve / read-only auto-deny / turn failure). **No mocks of app code.**
 
 The fake grok fixture emits the **same wire shapes as the real CLI** (verified
 against grok 0.2.117): `tool_call` with `title` / `toolName` / `rawInput`,
-results as title-less `tool_call_update`, and `available_commands` noise. Tests
-that pass against a friendlier invented shape prove nothing.
+results as title-less `tool_call_update`, and `available_commands` noise.
+Tests that pass against a friendlier invented shape prove nothing.
 
-## Safety / ops
+## Safety
 
 - Loopback-only bind + middleware reject
 - UUID validation on run IDs (no path traversal)
@@ -186,27 +202,61 @@ that pass against a friendlier invented shape prove nothing.
 - Cancel sends SIGTERM then SIGKILL after 3s
 - Permission modes / sandbox / allow-deny rules passed through to Grok
 - Structured stdout logs with timestamps
-- No secrets in repo; uses your existing `~/.grok/auth.json` / `XAI_API_KEY`
-- Rollback: stop process; delete `data/runs` / `data/outputs` / checkpoints if needed; app is stateless beyond disk
+- No secrets in the repo. Uses your existing `~/.grok/auth.json` / `XAI_API_KEY`
+- Rollback: stop the process; delete `data/runs` / `data/outputs` / checkpoints
+  if needed. The app is stateless beyond disk.
 
-### Known limits (honest)
+### Known limits
 
-- **Budget USD** is a local estimate (`$0.05`/turn default when no `total_cost_usd` on `end`); pre-spawn gate + mid-run kill on tool turns. Not a substitute for xAI billing
-- **SSH remote runs** use `scp` + `ssh` BatchMode; stay on headless transport (no ACP over SSH yet); live connectivity is not CI-tested
-- **Subagents** are Grok’s own `spawn_subagent` / `--agent` profiles — Studio surfaces definitions and flags, does not reimplement the agent loop
-- **Interactive approvals** use ACP for `default` / `acceptEdits` only; `bypassPermissions` / `plan` / `auto` / `dontAsk` stay on headless streaming-json
-- **`acceptEdits`** auto-approves `edit` / `read` / `search` tool calls and still prompts for `execute` / `fetch`. Dismissing a prompt (Escape, backdrop, ×) **denies** it — leaving it unanswered would stall the turn
-- **Plan mode** enforcement is the CLI’s (`--permission-mode plan`); Studio’s own policy layer only guards the ACP approval path (e.g. a `read-only` sandbox auto-denies writes)
-- **Provider routing** passes the documented `--xai-api-base-url` / `--cli-chat-proxy-base-url` flags on the ACP transport. The headless top-level command has no such flags, so there it is env-var best-effort only
-- **Tool events** are normalized server-side to `{name, input}` / `{name, result}`; `tool_call_update` has no title, so results are correlated to their call by `toolCallId`. `available_commands` (~15KB × ~4 per run) is dropped rather than logged and streamed
-- **Screen control** (OS-level UI automation) is out of scope for this app
-- **Agent loop** is the real Grok CLI process (headless or ACP); Studio is the desktop shell + orchestration
+- **Budget USD** is a local estimate (`$0.05`/turn default when no
+  `total_cost_usd` on `end`); pre-spawn gate + mid-run kill on tool turns. Not
+  a substitute for xAI billing.
+- **SSH remote runs** use `scp` + `ssh` BatchMode; stay on headless transport
+  (no ACP over SSH yet); live connectivity is not CI-tested.
+- **Subagents** are Grok's own `spawn_subagent` / `--agent` profiles. Studio
+  surfaces definitions and flags. It does not reimplement the agent loop.
+- **Interactive approvals** use ACP for `default` / `acceptEdits` only.
+  `bypassPermissions` / `plan` / `auto` / `dontAsk` stay on headless
+  streaming-json.
+- **`acceptEdits`** auto-approves `edit` / `read` / `search` and still prompts
+  for `execute` / `fetch`. Dismissing a prompt (Escape, backdrop, ×) **denies**
+  it.
+- **Plan mode** enforcement is the CLI's (`--permission-mode plan`). Studio's
+  own policy layer only guards the ACP approval path (for example a
+  `read-only` sandbox auto-denies writes).
+- **Provider routing** passes `--xai-api-base-url` /
+  `--cli-chat-proxy-base-url` on ACP. The headless top-level command has no
+  such flags, so there it is env-var best-effort only.
+- **Tool events** are normalized server-side to `{name, input}` /
+  `{name, result}`. `tool_call_update` has no title, so results are correlated
+  to their call by `toolCallId`. `available_commands` (~15KB × ~4 per run) is
+  dropped rather than logged and streamed.
+- **Screen control** (OS-level UI automation) is out of scope.
+- **Agent loop** is the real Grok CLI process (headless or ACP). Studio is the
+  desktop shell + orchestration.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
 | Health red | `grok login` or set `XAI_API_KEY`; check `GROK_BIN` |
-| 429 on Run | Wait for active runs or raise concurrency in `createConfig` |
-| Empty gallery | Agent must produce files; check `data/runs/<id>/events.jsonl` and session `images/` |
+| 429 on Run | Wait for active runs, or raise concurrency / daily budget in settings |
+| Empty gallery | Agent must produce files; check `data/runs/<id>/events.jsonl` |
 | Port in use | `HEIR_STUDIO_PORT=3848 npm start` |
+| Phone gets HTML instead of JSON | Cloudflare Access is on, but the service token is missing from pairing |
+| No permission prompts | Remove `permission_mode = "always-approve"` / `yolo = true` from `~/.grok/config.toml` |
+| Tunnel is an open shell | You started the server by hand and left `HEIR_STUDIO_TRUST_LOOPBACK` on. Use `npm run tunnel`. |
+
+## Documentation
+
+| Doc | For |
+|-----|-----|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Dev setup, tests, PR bar |
+| [docs/architecture.md](docs/architecture.md) | Process model, ACP vs headless, data paths |
+| [docs/environment.md](docs/environment.md) | Env vars and settings layers |
+| [ios/README.md](ios/README.md) | Phone pairing, tunnel, Xcode, TestFlight |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability |
+
+## License
+
+[MIT](LICENSE) © Heir Labs and contributors.

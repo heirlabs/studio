@@ -89,8 +89,8 @@ describe("createApnsJwt", () => {
     const now = 1_700_000_000;
     const jwt = createApnsJwt({
       keyPem: pem,
-      keyId: "629PDCXMGR",
-      teamId: "2Y8MR5FHTC",
+      keyId: "KEYID12345",
+      teamId: "TEAMID1234",
       now,
     });
     const [h, p, s] = jwt.split(".");
@@ -98,8 +98,8 @@ describe("createApnsJwt", () => {
     const header = JSON.parse(Buffer.from(h, "base64url").toString());
     const payload = JSON.parse(Buffer.from(p, "base64url").toString());
     assert.equal(header.alg, "ES256");
-    assert.equal(header.kid, "629PDCXMGR");
-    assert.equal(payload.iss, "2Y8MR5FHTC");
+    assert.equal(header.kid, "KEYID12345");
+    assert.equal(payload.iss, "TEAMID1234");
     assert.equal(payload.iat, now);
     assert.equal(Buffer.from(s, "base64url").length, 64);
   });
@@ -136,6 +136,18 @@ describe("resolveApnsConfig", () => {
     assert.equal(cfg, null);
   });
 
+  it("returns null for token auth when team id is missing", () => {
+    const dir = tmpData();
+    const keyPath = path.join(dir, "AuthKey_ABCDEF1234.p8");
+    fs.writeFileSync(keyPath, "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----\n");
+    const cfg = resolveApnsConfig({
+      HEIR_STUDIO_APNS_CERT_PATH: "/no/such.crt",
+      HEIR_STUDIO_APNS_TLS_KEY_PATH: "/no/such.key",
+      HEIR_STUDIO_APNS_KEY_PATH: keyPath,
+    });
+    assert.equal(cfg, null);
+  });
+
   it("reads key id from the filename and honours production host", () => {
     const dir = tmpData();
     const keyPath = path.join(dir, "AuthKey_ABCDEF1234.p8");
@@ -144,12 +156,13 @@ describe("resolveApnsConfig", () => {
       HEIR_STUDIO_APNS_CERT_PATH: "/no/such.crt",
       HEIR_STUDIO_APNS_TLS_KEY_PATH: "/no/such.key",
       HEIR_STUDIO_APNS_KEY_PATH: keyPath,
+      HEIR_STUDIO_APNS_TEAM_ID: "TEAMID1234",
       HEIR_STUDIO_APNS_PRODUCTION: "1",
     });
     assert.equal(cfg.auth, "token");
     assert.equal(cfg.keyPath, keyPath);
     assert.equal(cfg.keyId, "ABCDEF1234");
-    assert.equal(cfg.teamId, "2Y8MR5FHTC");
+    assert.equal(cfg.teamId, "TEAMID1234");
     assert.equal(cfg.bundleId, "com.heir.studio.mobile");
     assert.equal(cfg.production, true);
     assert.equal(cfg.host, "api.push.apple.com");

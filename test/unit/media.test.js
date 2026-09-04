@@ -68,7 +68,7 @@ describe("media helpers", () => {
   });
 
   it("encodeSessionCwd matches encodeURIComponent(resolve)", () => {
-    const cwd = "/Users/futjr/grok-studio";
+    const cwd = "/Users/alex/project";
     assert.equal(encodeSessionCwd(cwd), encodeURIComponent(path.resolve(cwd)));
   });
 

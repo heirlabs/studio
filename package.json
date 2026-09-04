@@ -5,8 +5,16 @@
   "private": true,
   "type": "module",
   "main": "electron/main.js",
-  "author": "local",
+  "author": "Heir Labs",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heirlabs/studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/heirlabs/studio/issues"
+  },
+  "homepage": "https://github.com/heirlabs/studio#readme",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
@@ -36,7 +44,7 @@
   "build": {
     "appId": "com.heir.studio",
     "productName": "Heir Studio",
-    "copyright": "Local use only",
+    "copyright": "Copyright © 2026 Heir Labs",
     "directories": {
       "output": "release",
       "buildResources": "electron"

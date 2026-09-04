@@ -1,0 +1,23 @@
+name: Feature request
+description: A change you want in the desktop app, server, or iOS companion
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is painful or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Studio do instead? Name the screen or API if you know it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you tried
+      description: Settings, grok CLI flags, or a workaround.

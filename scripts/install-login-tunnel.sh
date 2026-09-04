@@ -4,7 +4,7 @@
 set -euo pipefail
 
 LABEL="ai.heir.studio.tunnel"
-ROOT="/Users/futjr/grok-studio"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${ROOT}/scripts/macos/${LABEL}.plist"
 DEST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
@@ -21,7 +21,7 @@ if [ ! -x "${ROOT}/scripts/macos/tunnel-login.sh" ]; then
 fi
 
 mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs"
-cp "$SRC" "$DEST"
+sed -e "s|__HEIR_STUDIO_ROOT__|${ROOT}|g" -e "s|__HEIR_HOME__|${HOME}|g" "$SRC" > "$DEST"
 chmod 644 "$DEST"
 
 if ! plutil -lint "$DEST" >/dev/null; then

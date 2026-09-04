@@ -1,0 +1,38 @@
+name: Bug report
+description: Something does not work the way the docs or the UI say it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is an auth bypass, token leak, or path traversal, stop and use a
+        [private advisory](https://github.com/heirlabs/studio/security/advisories/new)
+        instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: `git rev-parse --short HEAD` or the app version in About.
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: macOS version, Node version, `grok --version`, desktop app vs `npm start` vs iOS.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal steps. Redact pairing tokens and `.env.tunnel` values.
+    validations:
+      required: true

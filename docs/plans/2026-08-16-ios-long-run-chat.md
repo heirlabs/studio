@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Session stays on this Mac. Tunnel (`studio.heir.es`) or Tailscale is the only remote path.
+- Session stays on this Mac. Tunnel or Tailscale is the only remote path.
 - Do not deploy Heir Studio to Railway. The agent needs the local filesystem, `grok` login, git, worktrees, and APNs certs.
 - Phone must not invent compact/checkpoint/worktree state. If the HTTP API is missing, add it to the server first.
 - Remote clients cannot inherit `bypassPermissions` unless `allowBypassPermissions: true`.

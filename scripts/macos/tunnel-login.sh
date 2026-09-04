@@ -13,7 +13,7 @@ if [ -s "$NVM_DIR/nvm.sh" ]; then
   . "$NVM_DIR/nvm.sh"
 fi
 
-ROOT="/Users/futjr/grok-studio"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 # Pairing tokens used to land in the LaunchAgent log at 0644. Keep that file
